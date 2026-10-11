@@ -1,7 +1,7 @@
 # 落地实现方案（bridge-ai · CodeBuddy 专用中继）
 
 > ⚠️ **范围**：本文描述 `bridge-ai` 的**实际实现**，仅面向 Tencent CodeBuddy CLI（`@tencent-ai/codebuddy-code`）。
-> 不支持 Claude Code / Codex / Kimi Code。早期基于 Kimi Code 的设计稿（Hono 草图、mock 后端、内部 `Message` 归一化层等）**均未实现**，见文末「历史设计稿（已弃用）」。
+> 不支持 Claude Code / Codex / Kimi Code。早期基于 Kimi Code 的设想（Hono 草图、mock 后端等）**均未实现**，实际仅支持 CodeBuddy。
 
 ## 架构总览
 
@@ -79,14 +79,4 @@ CLI 子命令：`server` / `login` / `status` / `scan`。`refresh` 模式会把�
 
 ## 合规
 
-反代复用订阅额度在厂商 ToS 属灰区（teamclaude 等同类项目也单写 `compliance.md`）。个人自用、私有链路、不开公网、不多人共用风险最低；量产前务必评估合规。
-
----
-
-## 历史设计稿（已弃用，仅保留参考价值）
-
-早期设想基于 Kimi Code（原生自定义 provider），并画了 Hono 草图与 mock 后端。以下**均未实现**，项目已确定仅支持 CodeBuddy：
-
-- 接收端用 **Hono/Fastify**、内部 `Message` 归一化层、`config.toml`、mock 后端、"接任意后端 LLM" —— **未实现**（实际用原生 `node:http`，只转发 CodeBuddy，不做后端抽象）。
-- 里程碑 2 的「MITM 透明拦截 + 注入 token」—— 实际仅以 `scripts/capture-*.mjs` 形式存在（一次性抓取工具），运行期转发靠 `auth-codebuddy.js` 的 refresh/apikey 模式，不依赖常驻 MITM。
-- 文中 `aiagent/packages/ai`、`api.moonshot.cn`、`api.anthropic.com`、上游 `/v1/chat/completions`、`5h 会话 / 7d 周配额` 轮转逻辑等，均为旧稿，与现实现不符。
+反代复用订阅额度可能触及厂商 ToS 限制。个人自用、私有链路、不开公网、不多人共用风险最低；量产前务必评估合规。
