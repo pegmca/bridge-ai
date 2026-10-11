@@ -8,3 +8,7 @@ bridge.state.json
 
 # node
 node_modules/
+
+# debugging / capture scripts (temporary, contain secrets)
+*.mjs
+findtok.py

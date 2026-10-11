@@ -22,6 +22,41 @@ function loadConfig(p) {
   return JSON.parse(fs.readFileSync(p, 'utf8'));
 }
 
+// Persisted refresh tokens live in a sibling state file so the offline refresh
+// token can be rotated across restarts without re-capturing it.
+function statePathFor(configPath) {
+  return path.join(path.dirname(configPath), 'bridge.state.json');
+}
+function loadState(p) {
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch {
+    return { accounts: {} };
+  }
+}
+function saveState(p, s) {
+  try {
+    fs.writeFileSync(p, JSON.stringify(s, null, 2));
+  } catch (e) {
+    console.error(`[bridge] warning: could not persist state: ${e.message}`);
+  }
+}
+function wireRefreshPersistence(pool, statePath) {
+  const state = loadState(statePath);
+  for (const a of pool) {
+    if ((a.auth || {}).mode === 'refresh') {
+      if (state.accounts && state.accounts[a.name]) {
+        a.auth.refreshToken = state.accounts[a.name];
+      }
+      a.auth._persistRefreshToken = (tok) => {
+        state.accounts = state.accounts || {};
+        state.accounts[a.name] = tok;
+        saveState(statePath, state);
+      };
+    }
+  }
+}
+
 function printUsage() {
   console.log(`bridge-ai — OpenAI-compatible relay for CodeBuddy subscription tokens
 
@@ -47,6 +82,7 @@ async function main() {
   const configPath = getConfigPath(argv);
   const cfg = loadConfig(configPath);
   const pool = createPool(cfg);
+  wireRefreshPersistence(pool, statePathFor(configPath));
 
   if (cmd === 'server') {
     const server = createServer({ config: cfg, pool });
@@ -57,9 +93,9 @@ async function main() {
       const provider = cfg.provider || {};
       console.log(`[bridge] listening on http://${host}:${port}`);
       console.log(
-        `[bridge] provider=${provider.type || 'codebuddy'} baseUrl=${
-          provider.baseUrl || 'https://copilot.tencent.com'
-        } path=${provider.path || '/v1/chat/completions'}`
+        `[bridge] provider=${provider.protocol || provider.type || 'codebuddy-native'} hosts=${(
+          provider.hosts || [provider.baseUrl || 'wb.tencentbuddy.com']
+        ).join(', ')} path=${provider.path || '/v2/chat/completions'}`
       );
       console.log(`[bridge] accounts=${pool.map((a) => a.name).join(', ')}`);
     });

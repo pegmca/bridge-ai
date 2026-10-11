@@ -43,15 +43,20 @@ function filterOutHeaders(h) {
 
 export function createServer({ config, pool }) {
   const provider = config.provider || {};
-  const baseUrl = provider.baseUrl || 'https://copilot.tencent.com';
-  const upstreamPath = provider.path || '/v1/chat/completions';
+  const hosts = provider.hosts && provider.hosts.length
+    ? provider.hosts
+    : [provider.baseUrl ? new URL(provider.baseUrl).host : 'wb.tencentbuddy.com'];
+  const upstreamPath = provider.path || '/v2/chat/completions';
   const authHeader = provider.authHeader || 'Authorization';
   const authScheme = provider.authScheme || 'Bearer';
+  const identity = provider.identity || { 'X-Product': 'SaaS', 'X-Domain': 'www.codebuddy.cn' };
   const timeout = provider.timeout || 120000;
   const cooldownMs = (config.rotation && config.rotation.cooldownMs) || 3600000;
 
+  const ctx = { hosts, identity };
+
   async function handleChat(req, res) {
-    const bodyStr = await readBody(req);
+    let bodyStr = await readBody(req);
     let parsed;
     try {
       parsed = JSON.parse(bodyStr);
@@ -60,7 +65,10 @@ export function createServer({ config, pool }) {
       res.end(JSON.stringify({ error: { message: 'invalid JSON body' } }));
       return;
     }
-    const stream = !!parsed.stream;
+    const stream = true; // CodeBuddy chat API only supports streaming
+    // Force streaming in the upstream body (non-stream is rejected upstream).
+    parsed.stream = true;
+    bodyStr = JSON.stringify(parsed);
 
     const incoming = {};
     for (const [k, v] of Object.entries(req.headers)) {
@@ -72,40 +80,52 @@ export function createServer({ config, pool }) {
       if (!account) throw new UpstreamHttpError(503, 'no available account');
       attempted.add(account);
       markUsed(account);
-      const token = await resolveToken(account);
-      const headers = { ...incoming, [authHeader]: `${authScheme} ${token}` };
-      try {
-        const r = await forwardRequest({
-          baseUrl,
-          path: upstreamPath,
-          method: 'POST',
-          headers,
-          bodyStr,
-          stream,
-          timeout,
-        });
-        clearError(account);
-        return r;
-      } catch (e) {
-        if (e instanceof UpstreamHttpError) {
-          const cls = classifyStatus(e.status);
-          if (cls === 'auth') {
-            refreshToken(account); // drop cached token; next resolve re-reads
-            markAuthError(account, `status ${e.status}`);
-          } else if (cls === 'quota') {
-            markExhausted(account, cooldownMs);
-          } else {
-            markExhausted(account, Math.min(cooldownMs, 60000));
+      const token = await resolveToken(account, ctx);
+      const baseHeaders = {
+        ...incoming,
+        ...identity,
+        'x-codebuddy-request': '1',
+        [authHeader]: `${authScheme} ${token}`,
+      };
+      let lastErr;
+      for (const host of hosts) {
+        const headers = { ...baseHeaders, host };
+        try {
+          const r = await forwardRequest({
+            baseUrl: `https://${host}`,
+            path: upstreamPath,
+            method: 'POST',
+            headers,
+            bodyStr,
+            stream,
+            timeout,
+          });
+          clearError(account);
+          return r;
+        } catch (e) {
+          lastErr = e;
+          if (e instanceof UpstreamHttpError) {
+            const cls = classifyStatus(e.status);
+            if (cls === 'auth') {
+              refreshToken(account); // drop cached token; next resolve re-reads
+              markAuthError(account, `status ${e.status}`);
+              break; // auth error is account-level, don't retry other hosts
+            }
+            // host-level failure -> try next host
           }
-          if (attempted.size < pool.length) return attempt(attempted);
-          throw e;
+          // fall through to next host
         }
-        if (e instanceof UpstreamStreamError) {
+      }
+      if (lastErr) {
+        if (lastErr instanceof UpstreamHttpError) {
+          const cls = classifyStatus(lastErr.status);
+          if (cls === 'quota') markExhausted(account, cooldownMs);
+          else markExhausted(account, Math.min(cooldownMs, 60000));
+        } else if (lastErr instanceof UpstreamStreamError) {
           markExhausted(account, cooldownMs);
-          if (attempted.size < pool.length) return attempt(attempted);
-          throw e;
         }
-        throw e;
+        if (attempted.size < pool.length) return attempt(attempted);
+        throw lastErr;
       }
     };
 

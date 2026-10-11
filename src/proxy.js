@@ -29,6 +29,28 @@ function pickClient(protocol) {
   return protocol === 'http:' ? http : https;
 }
 
+// Some hosts (CodeBuddy's chat gateway) occasionally return the SSE payload as a
+// stream of comma-separated decimal ASCII codes ("100,97,116,97,58,32,123...").
+// Detect that on the first chunk and transparently decode back to real text.
+function isCharCodeFormat(sample) {
+  const s = sample.slice(0, 200);
+  return /^\d{2,3}(,\d{2,3}){3,}/.test(s);
+}
+function decodeCharCodes(str) {
+  let out = '';
+  let n = '';
+  for (const ch of str) {
+    if (ch === ',') {
+      out += n === '' ? '' : String.fromCharCode(parseInt(n, 10) || 0);
+      n = '';
+    } else {
+      n += ch;
+    }
+  }
+  if (n !== '') out += String.fromCharCode(parseInt(n, 10) || 0);
+  return out;
+}
+
 // payload: { baseUrl, path, method, headers, bodyStr, stream, timeout }
 export function forwardRequest(payload) {
   const u = new URL(payload.baseUrl);
@@ -82,12 +104,18 @@ export function forwardRequest(payload) {
         const peekChunks = [];
         let acc = '';
         let committed = false;
+        let charCode = false;
+
+        const decode = (chunk) => {
+          if (!charCode) return chunk;
+          return Buffer.from(decodeCharCodes(chunk.toString('utf8')));
+        };
 
         const commit = () => {
           if (committed) return;
           committed = true;
           out.push(Buffer.concat(peekChunks));
-          res.on('data', (d) => out.push(d));
+          res.on('data', (d) => out.push(decode(d)));
           res.on('end', () => out.push(null));
           res.on('error', (e) => out.destroy(e));
           resolve({ streaming: true, status, headers: res.headers, stream: out });
@@ -95,8 +123,12 @@ export function forwardRequest(payload) {
 
         res.on('data', (chunk) => {
           if (committed) return; // a later 'data' listener now owns forwarding
-          peekChunks.push(chunk);
-          acc += chunk.toString('utf8');
+          if (!charCode && peekChunks.length === 0) {
+            charCode = isCharCodeFormat(chunk.toString('utf8'));
+          }
+          const buf = decode(chunk);
+          peekChunks.push(buf);
+          acc += buf.toString('utf8');
           if (acc.includes('\n\n') || acc.length > 8192) {
             const err = detectStreamError(acc);
             if (err) {
