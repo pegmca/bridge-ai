@@ -1,50 +1,32 @@
 # bridge-ai
 
-把命令行 AI 编程 Agent（Kimi Code / Claude Code / Codex）的订阅 plan 额度，
-映射成普通 OpenAI 兼容的 HTTP 接口，供任意支持 OpenAI 协议的上游工具调用。
+> ⚠️ **本项目仅针对 [Tencent CodeBuddy](https://www.codebuddy.cn) CLI**（`@tencent-ai/codebuddy-code`）。
+> 它把 CodeBuddy 的订阅 plan 额度，映射成 OpenAI 兼容的 HTTP 接口，供本地 harness / 任意支持 OpenAI 协议的上游工具调用。
+> 不支持 Claude Code / Codex / Kimi Code 等其它 CLI——那些是别的项目范畴。
 
-## 为什么可行
+## 它做什么
 
-这些 CLI 本质上只是"自带 OAuth 登录的 HTTP 客户端"：
+CodeBuddy CLI 登录后持有订阅 token；本项目在不改 CLI 源码的前提下，
+**接管其出站聊天请求并注入订阅 token**，把它重暴露成 OpenAI 兼容的 `/v1/chat/completions`：
 
-- 登录后把订阅 token 存在本地凭证库
-  - Claude Code：`~/.claude/.credentials.json` 或 macOS Keychain
-  - Codex：`~/.codex/auth.json`
-  - Kimi Code：`~/.kimi-code/` 登录态
-- 运行时向厂商端点发**标准协议**请求
-  - Claude → Anthropic `/v1/messages`
-  - Codex → OpenAI Responses API
-  - Kimi Code → OpenAI 兼容 `/v1/chat/completions`（原生支持自定义 provider）
-- 订阅额度由厂商按账号 / 会话 / 周配额下发，与"API key 按量计费"是两套体系
-
-> 结论：**只要接管 CLI 的出站请求并注入订阅 token，就能把它重暴露成 OpenAI 兼容 HTTP**。
-> 不需要阅读 CLI 源码——这是通用模式。
+- OpenAI 兼容接收端（本地 / 远程）→ 注入 CodeBuddy 订阅 token → 转发 `wb.tencentbuddy.com` → SSE 透传
+- 支持多账号轮转、refresh token 自动刷新与轮转、上游主机故障切换
 
 ## 目录结构
 
 ```
 bridge-ai/
-├── README.md          # 本文件：总览与快速开始
+├── README.md          # 本文件：总览与快速开始（CodeBuddy 专用）
 └── docs/
-    ├── RESEARCH.md    # 现有开源方案调研（已验证的通用实现）
+    ├── RESEARCH.md    # 现有开源方案调研（参考用，通用思路）
     └── DESIGN.md      # 落地实现方案 + 最小可用草图
 ```
 
-## 两条落地路径
-
-| 路径 | 含义 | 合规风险 |
-|------|------|----------|
-| **A. 接收侧（推荐先做）** | 让 kimi-code 指向我们自己的 OpenAI 兼容端点，我们写服务端接收 | 低：纯协议桥接 |
-| **B. 转发侧** | 拦截 kimi-code 出站请求，注入订阅 token 转发厂商，再对外暴露 | 灰区：涉及复用订阅额度 |
-
-路径 A 完全合规且能立即跑通，建议作为第一里程碑；路径 B 复用 plan 额度，
-但有 ToS 灰色地带风险，需谨慎评估。
-
 ## 名词
 
-- **bridge**：本项目实现的本地代理 / 桥接服务
-- **上游工具**：调用 bridge 的客户端（另一个 Claude Code、Cursor、IDE 插件等）
-- **厂商端点**：Anthropic / OpenAI / Moonshot / Tencent CodeBuddy 的真实 API
+- **bridge**：本项目实现的代理 / 桥接服务
+- **上游工具**：调用 bridge 的客户端（本地 harness、Cursor、IDE 插件等）
+- **厂商端点**：Tencent CodeBuddy 的真实 API（`wb.tencentbuddy.com` / `copilot.tencent.com`）
 
 ---
 
