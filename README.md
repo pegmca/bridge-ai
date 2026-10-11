@@ -1,171 +1,170 @@
 # bridge-ai
 
-> ⚠️ **本项目仅针对 [Tencent CodeBuddy](https://www.codebuddy.cn) CLI**（`@tencent-ai/codebuddy-code`）。
-> 它把 CodeBuddy 的订阅 plan 额度，映射成 OpenAI 兼容的 HTTP 接口，供本地 harness / 任意支持 OpenAI 协议的上游工具调用。
-> 不支持 Claude Code / Codex / Kimi Code 等其它 CLI——那些是别的项目范畴。
+> ⚠️ **This project targets the [Tencent CodeBuddy](https://www.codebuddy.cn) CLI only** (`@tencent-ai/codebuddy-code`).
+> It maps a CodeBuddy subscription plan quota into an OpenAI-compatible HTTP endpoint, for use by a local harness or any OpenAI-protocol client.
+> It does **not** support other CLIs such as Claude Code / Codex / Kimi Code — those belong to other projects.
 
-## 它做什么
+## What it does
 
-CodeBuddy CLI 登录后持有订阅 token；本项目在不改 CLI 源码的前提下，
-**接管其出站聊天请求并注入订阅 token**，把它重暴露成 OpenAI 兼容的 `/v1/chat/completions`：
+After the CodeBuddy CLI logs in, it holds a subscription token. Without modifying the CLI source, this project **takes over its outbound chat requests, injects the subscription token, and re-exposes it as an OpenAI-compatible `/v1/chat/completions`**:
 
-- OpenAI 兼容接收端（本地 / 远程）→ 注入 CodeBuddy 订阅 token → 转发 `wb.tencentbuddy.com` → SSE 透传
-- 支持多账号轮转、refresh token 自动刷新与轮转、上游主机故障切换
+- OpenAI-compatible receiver (local / remote) → inject CodeBuddy subscription token → forward to `wb.tencentbuddy.com` → SSE passthrough
+- Multi-account rotation, automatic refresh-token renewal & rotation, and upstream host failover
 
-## 目录结构
+## Directory layout
 
 ```
 bridge-ai/
-├── README.md          # 本文件：总览与快速开始（CodeBuddy 专用）
+├── README.md          # This file: overview and quick start (CodeBuddy only)
 └── docs/
-    ├── RESEARCH.md    # 现有开源方案调研（参考用，通用思路）
-    └── DESIGN.md      # 落地实现方案 + 最小可用草图
+    ├── RESEARCH.md    # Survey of existing open-source approaches (background)
+    └── DESIGN.md      # Implementation design + minimal viable sketch
 ```
 
-## 名词
+## Glossary
 
-- **bridge**：本项目实现的代理 / 桥接服务
-- **上游工具**：调用 bridge 的客户端（本地 harness、Cursor、IDE 插件等）
-- **厂商端点**：Tencent CodeBuddy 的真实 API（`wb.tencentbuddy.com` / `copilot.tencent.com`）
+- **bridge**: the proxy / bridging service implemented by this project
+- **upstream client**: the client that calls the bridge (local harness, Cursor, IDE plugins, etc.)
+- **vendor endpoint**: Tencent CodeBuddy's real API (`wb.tencentbuddy.com` / `copilot.tencent.com`)
 
 ---
 
-## 运行（方案 A · CodeBuddy 专用中继，已落地）
+## Running (Approach A · CodeBuddy-specific relay, implemented)
 
-零依赖 Node 实现：OpenAI 兼容接收端 → 注入 CodeBuddy 订阅 token → 转发 `wb.tencentbuddy.com` → SSE 透传，多账号轮转。
+Zero-dependency Node implementation: OpenAI-compatible receiver → inject CodeBuddy subscription token → forward to `wb.tencentbuddy.com` → SSE passthrough, with multi-account rotation.
 
-### 0. CodeBuddy 真实端点（实测）
+### 0. CodeBuddy real endpoint (verified)
 
-- 聊天接口：`https://wb.tencentbuddy.com/v2/chat/completions`（主），`https://copilot.tencent.com/v2/chat/completions`（备）。
-  - ⚠️ **路径是 `/v2/chat/completions`，不是 `/v1/` 也不是裸 `/chat/completions`**。
-  - `copilot.tencent.com` 同路径会返回账号信息而非聊天；真正出 token 的是 `wb.tencentbuddy.com`。
-  - 上游**只接受流式**（`stream:true`），非流式直接 `400`。
-- 鉴权：除标准 `Authorization: Bearer <accessToken>` 外，还需身份头 `X-Product: SaaS`、`X-Domain: www.codebuddy.cn`、`X-User-Id: <uid>`、`x-codebuddy-request: 1`。
-- Token 是**两套** JWT：
-  - access token（RS256，`typ:Bearer`，约 28 天）—— 聊天用的 Bearer。
-  - refresh token（HS512，`typ:Offline`，约 30 天）—— 用它调 `/v2/plugin/auth/token/refresh` 换 access token；**该接口还会回吐新的 refresh token（可轮转）**。
-- CodeBuddy 不会把这两套 token 以明文落盘，所以下面用「刷新换发」模式，而不是直接读文件。
+- Chat endpoint: `https://wb.tencentbuddy.com/v2/chat/completions` (primary), `https://copilot.tencent.com/v2/chat/completions` (failover).
+  - ⚠️ **The path is `/v2/chat/completions` — not `/v1/` and not a bare `/chat/completions`.**
+  - `copilot.tencent.com` at the same path returns account info rather than chat; the endpoint that actually streams tokens is `wb.tencentbuddy.com`.
+  - The upstream **only accepts streaming** (`stream:true`); a non-stream request gets an immediate `400`.
+- Auth: in addition to the standard `Authorization: Bearer <accessToken>`, the following identity headers are required: `X-Product: SaaS`, `X-Domain: www.codebuddy.cn`, `X-User-Id: <uid>`, `x-codebuddy-request: 1`.
+- Tokens come as **two** JWTs:
+  - access token (RS256, `typ:Bearer`, ~28 days) — used as the Bearer for chat.
+  - refresh token (HS512, `typ:Offline`, ~30 days) — used to call `/v2/plugin/auth/token/refresh` to mint a new access token; **that endpoint also returns a new refresh token (rotatable).**
+- CodeBuddy does not persist these two tokens in plaintext on disk, so below we use a "refresh-and-mint" mode rather than reading files directly.
 
-### 1. 配置
+### 1. Configuration
 
 ```bash
 cp config.example.json config.json
 ```
 
-`config.json` 关键字段：
+Key fields in `config.json`:
 
-- `provider.hosts` / `provider.path`：上游主机数组 + 路径。`hosts` 默认 `["wb.tencentbuddy.com","copilot.tencent.com"]`，`path` 默认 `/v2/chat/completions`。
-- `provider.identity`：要注入的身份头（默认 `X-Product: SaaS`、`X-Domain: www.codebuddy.cn`）。
-- `accounts[]`：账号池，支持三种认证：
-  - `{ "mode": "refresh", "refreshToken": "…", "userId": "…" }` —— **推荐**。用离线 refresh token 换 access token，自动轮转并落盘到 `bridge.state.json`，可长期自持。（见下方「捕获 refresh token」）
-  - `{ "mode": "apikey", "apiKey": "…" }` —— 在 CodeBuddy 控制台生成的 API key，最省事、最持久。
-  - `{ "mode": "import", "source": "~/.codebuddy" }` —— **对 CodeBuddy 不生效**（其 token 不落盘明文），仅作占位/其它厂商用。
+- `provider.hosts` / `provider.path`: upstream host array + path. `hosts` defaults to `["wb.tencentbuddy.com","copilot.tencent.com"]`, `path` defaults to `/v2/chat/completions`.
+- `provider.identity`: identity headers to inject (defaults to `X-Product: SaaS`, `X-Domain: www.codebuddy.cn`).
+- `accounts[]`: the account pool, supporting several auth modes:
+  - `{ "mode": "refresh", "refreshToken": "…", "userId": "…" }` —— **recommended**. Uses the offline refresh token to mint an access token, auto-rotates and persists to `bridge.state.json`, self-sustaining long-term. (See "Capture refresh token" below.)
+  - `{ "mode": "apikey", "apiKey": "…" }` —— an API key generated in the CodeBuddy console; simplest and most durable.
+  - `{ "mode": "import", "source": "~/.codebuddy" }` —— **does not work for CodeBuddy** (its tokens are not stored in plaintext), kept only as a placeholder / for other vendors.
 
-### 2. 捕获 refresh token（仅首次 / token 链断开时）
+### 2. Capture refresh token (first time only / when the token chain breaks)
 
-在**已 `codebuddy` 登录过的那台机器**（需要 root，改 `/etc/hosts` + 占 `:443`）：
+On the **machine where `codebuddy` is already logged in** (requires root, edits `/etc/hosts` + binds `:443`):
 
 ```bash
 sudo node scripts/capture-token.mjs --config config.json
-# 会临时把 copilot.tencent.com / wb.tencentbuddy.com 指到本机并 MITM 一次，
-# 抓到 X-Refresh-Token 后写回 config.json，并复原 /etc/hosts。
+# Temporarily points copilot.tencent.com / wb.tencentbuddy.com to localhost and MITMs one request,
+# captures X-Refresh-Token, writes it back into config.json, then restores /etc/hosts.
 ```
 
-脚本会自动填好 `accounts[].auth.refreshToken` 与 `userId`。之后 bridge 自己刷新 + 轮转，**通常不需要再跑**。
+The script auto-fills `accounts[].auth.refreshToken` and `userId`. After that the bridge refreshes and rotates on its own — **you normally never need to run it again.**
 
-> 更简单的替代：在 CodeBuddy 控制台生成 API key，改用 `mode:"apikey"`。
+> Simpler alternative: generate an API key in the CodeBuddy console and use `mode:"apikey"`.
 
-### 3. 校验凭证
+### 3. Verify credentials
 
 ```bash
-node src/index.js login    # 校验每个账号能换出 access token
-node src/index.js status   # 看账号池 / 轮转状态
+node src/index.js login    # verify each account can mint an access token
+node src/index.js status   # view account pool / rotation status
 ```
 
-### 4. 启动
+### 4. Start
 
 ```bash
-node src/index.js server                 # 默认 127.0.0.1:8787
-# 或 BRIDGE_CONFIG=/path/to/config.json node src/index.js server
+node src/index.js server                 # defaults to 127.0.0.1:8787
+# or BRIDGE_CONFIG=/path/to/config.json node src/index.js server
 ```
 
-### 5. 调用
+### 5. Calling it
 
-本地 harness 指向它即可（标准 OpenAI 协议，`stream` 由 bridge 强制为 true）：
+Point your local harness at it (standard OpenAI protocol; `stream` is forced to `true` by the bridge):
 
 ```bash
 export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 ```
 
-### 6. 轮转规则
+### 6. Rotation rules
 
-- 每请求选「最久未用且未冷却」的账号；上游主机按 `provider.hosts` 顺序失败切换。
-- 上游 `401` → 标记 auth 错误并清缓存重换 token；`429` → 标记配额耗尽，冷却 `rotation.cooldownMs` 后轮到下一账号。
-- 流式响应在向上游发头前先窥探首段 SSE，遇错误事件则本账号内失败切换一次。
-- 个别网关节点会把 SSE 以「逗号分隔的 ASCII 码」形式返回，bridge 自动解码回正常 SSE。
+- Each request picks the "least-recently-used and not-cooled-down" account; upstream hosts fail over in `provider.hosts` order.
+- Upstream `401` → mark auth error and clear cache to re-mint token; `429` → mark quota exhausted, cool down for `rotation.cooldownMs`, then rotate to the next account.
+- For streaming responses, the first SSE chunk is peeked before headers are sent upstream; on an error event it fails over once within the same account.
+- A few gateway nodes return SSE as "comma-separated ASCII codes"; the bridge auto-decodes it back to normal SSE.
 
-### 7. 腾讯云部署
+### 7. Tencent Cloud deployment
 
-两种暴露方式二选一。
+Two exposure options, pick one.
 
-**(A) 私有隧道（推荐，无需开安全组）**
+**(A) Private tunnel (recommended, no security-group opening needed)**
 
 ```bash
-# 镜像内监听 0.0.0.0:8787，但安全组勿开放公网；用隧道暴露给本地 harness
+# Image listens on 0.0.0.0:8787, but do NOT open the security group to the public; expose to the local harness via a tunnel
 docker build -t bridge-ai .
 docker run -d -p 8787:8787 -v $PWD/config.json:/app/config.json bridge-ai
 ```
 
-本地反向隧道，harness 访问 `http://127.0.0.1:8787/v1`：
+Local reverse tunnel; the harness accesses `http://127.0.0.1:8787/v1`:
 
 ```bash
-ssh -N -L 8787:127.0.0.1:8787 tx        # 本地执行，tx=腾讯云别名
+ssh -N -L 8787:127.0.0.1:8787 tx        # run locally, tx = Tencent Cloud alias
 ```
 
-**(B) 直接公网访问（需配合 serverApiKey 鉴权）**
+**(B) Direct public access (must pair with `serverApiKey` auth)**
 
-`config.json` 里设 `listen.host: "0.0.0.0"` 并设置访问密钥：
+Set `listen.host: "0.0.0.0"` in `config.json` and set an access key:
 
 ```json
-"listen": { "host": "0.0.0.0", "port": 8787, "serverApiKey": "你的强随机密钥" }
+"listen": { "host": "0.0.0.0", "port": 8787, "serverApiKey": "your-strong-random-key" }
 ```
 
-bridge 收到任何请求（除 `/healthz`）都会校验密钥，缺失/错误返回 `401`：
+The bridge validates the key on every request (except `/healthz`); missing/wrong returns `401`:
 
 ```bash
 curl http://43.130.49.34:8787/v1/chat/completions \
-  -H "Authorization: Bearer 你的强随机密钥" \
+  -H "Authorization: Bearer your-strong-random-key" \
   -H 'Content-Type: application/json' \
   -d '{"model":"hy4-preview-f","messages":[{"role":"user","content":"hi"}]}'
-# 也可用 -H "x-api-key: 你的强随机密钥"
+# also accepted: -H "x-api-key: your-strong-random-key"
 ```
 
-> **必须**：在腾讯云控制台的**安全组**中放行入站 TCP `8787`（主机 `ufw`/iptables 已确认无拦截，自连公网 IP 超时即为安全组未放行所致）。否则 `http://43.130.49.34:8787/...` 无法从外部连入。
+> **Required**: open inbound TCP `8787` in the Tencent Cloud console **security group** (the host `ufw`/iptables is confirmed not blocking; a timeout when self-connecting via the public IP indicates the security group is not open). Otherwise `http://43.130.49.34:8787/...` is unreachable from outside.
 
-个人自用、私有链路；不接公网、不多人共用（反代复用订阅额度在厂商 ToS 属灰区）。
+For personal, private use only; do not expose publicly or share across multiple users (proxying a subscription quota may conflict with the vendor's Terms of Service).
 
-### 8. 日志
+### 8. Logging
 
-bridge 把运行日志写到启动时的 stdout（部署时重定向到 `bridge.log`）：
+The bridge writes its runtime log to stdout at startup (redirected to `bridge.log` in deployment):
 
 ```bash
-ssh tx "tail -f /opt/bridge-ai/bridge.log"     # 实时跟踪
-ssh tx "grep '\[fwd\]' /opt/bridge-ai/bridge.log"   # 只看转发记录
+ssh tx "tail -f /opt/bridge-ai/bridge.log"      # live tail
+ssh tx "grep '\[fwd\]' /opt/bridge-ai/bridge.log"   # forwarding records only
 ```
 
-每条请求两行：
+Two lines per request:
 
 ```
 [fwd] IN  POST /v1/chat/completions model=hy4-preview-f
 [fwd] OK  account=cb-1 host=wb.tencentbuddy.com status=200 2347ms
 ```
 
-- `IN` = 收到的请求；`OK`/`ERR` = 转发结果（`account`/`host`/`status`/耗时）。
-- 上游错误响应体（前 500 字符）会附在 `ERR` 行里。
-- **默认不记录对话内容**。如需核对 bridge 是否夹带内容，在 `config.json` 顶层开：
+- `IN` = request received; `OK`/`ERR` = forwarding result (`account`/`host`/`status`/latency).
+- The upstream error response body (first 500 chars) is appended to the `ERR` line.
+- **Conversation content is not logged by default.** To verify the bridge isn't injecting anything, enable at the top level of `config.json`:
 
 ```json
 "logOutgoingBody": true
 ```
 
-开启后每条请求多打一行 `[fwd] OUT <实际发给上游的 body>`（截断 8KB），可证明 bridge 只透传你的 `messages`。**注意**：这会落盘你的对话内容，仅调试时临时开启，用完请改回 `false`。
+When enabled, an extra `[fwd] OUT <actual body sent upstream>` line (truncated to 8KB) is logged per request, proving the bridge only passes through your `messages`. **Note**: this persists your conversation content to disk — enable only temporarily for debugging, then set it back to `false`.
