@@ -1,0 +1,18 @@
+{
+  "listen": { "host": "127.0.0.1", "port": 8787 },
+  "provider": {
+    "type": "codebuddy",
+    "baseUrl": "https://copilot.tencent.com",
+    "path": "/v1/chat/completions",
+    "authHeader": "Authorization",
+    "authScheme": "Bearer",
+    "timeout": 120000
+  },
+  "rotation": {
+    "cooldownMs": 3600000
+  },
+  "accounts": [
+    { "name": "cb-1", "type": "codebuddy", "auth": { "mode": "import", "source": "~/.codebuddy" } },
+    { "name": "cb-2", "type": "codebuddy", "auth": { "mode": "apikey", "apiKey": "REPLACE_WITH_YOUR_CODEBUDDY_API_KEY" } }
+  ]
+}

@@ -1,0 +1,10 @@
+# secrets / local config (may contain API keys or imported tokens)
+config.json
+bridge.state.json
+
+# logs / os
+*.log
+.DS_Store
+
+# node
+node_modules/
