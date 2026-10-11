@@ -16,7 +16,6 @@
 
 | 仓库 | 亮点 |
 |------|------|
-| [KarpelesLab/teamclaude](https://github.com/KarpelesLab/teamclaude) | 最成熟。同时池化 Claude Max + ChatGPT/Codex 订阅；MITM 转发代理捕获硬编码 `api.anthropic.com`；5h 会话 / 7d 周配额自动轮转；token 过期前自刷新并写回凭证库；纯 Node 内置依赖 |
 | [Wei-Shaw/claude-relay-service](https://github.com/Wei-Shaw/claude-relay-service) | 多用户中转，Web 管理面板；自定义 Key 按人统计用量；账号冷却 / 限流；支持 Claude Code / Gemini CLI / Codex CLI |
 
 ### B. 订阅共享（跨机 / 拼车）
