@@ -161,3 +161,29 @@ curl http://43.130.49.34:8787/v1/chat/completions \
 > **必须**：在腾讯云控制台的**安全组**中放行入站 TCP `8787`（主机 `ufw`/iptables 已确认无拦截，自连公网 IP 超时即为安全组未放行所致）。否则 `http://43.130.49.34:8787/...` 无法从外部连入。
 
 个人自用、私有链路；不接公网、不多人共用（反代复用订阅额度在厂商 ToS 属灰区）。
+
+### 8. 日志
+
+bridge 把运行日志写到启动时的 stdout（部署时重定向到 `bridge.log`）：
+
+```bash
+ssh tx "tail -f /opt/bridge-ai/bridge.log"     # 实时跟踪
+ssh tx "grep '\[fwd\]' /opt/bridge-ai/bridge.log"   # 只看转发记录
+```
+
+每条请求两行：
+
+```
+[fwd] IN  POST /v1/chat/completions model=hy4-preview-f
+[fwd] OK  account=cb-1 host=wb.tencentbuddy.com status=200 2347ms
+```
+
+- `IN` = 收到的请求；`OK`/`ERR` = 转发结果（`account`/`host`/`status`/耗时）。
+- 上游错误响应体（前 500 字符）会附在 `ERR` 行里。
+- **默认不记录对话内容**。如需核对 bridge 是否夹带内容，在 `config.json` 顶层开：
+
+```json
+"logOutgoingBody": true
+```
+
+开启后每条请求多打一行 `[fwd] OUT <实际发给上游的 body>`（截断 8KB），可证明 bridge 只透传你的 `messages`。**注意**：这会落盘你的对话内容，仅调试时临时开启，用完请改回 `false`。

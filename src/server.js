@@ -52,6 +52,8 @@ export function createServer({ config, pool }) {
   const identity = provider.identity || { 'X-Product': 'SaaS', 'X-Domain': 'www.codebuddy.cn' };
   const timeout = provider.timeout || 120000;
   const cooldownMs = (config.rotation && config.rotation.cooldownMs) || 3600000;
+  // Optional: log the exact body sent upstream (off by default; may contain conversation content).
+  const logOutgoingBody = !!(config.logOutgoingBody);
 
   const ctx = { hosts, identity };
   // Optional gate for incoming requests (useful when bound to 0.0.0.0).
@@ -80,6 +82,10 @@ export function createServer({ config, pool }) {
     bodyStr = JSON.stringify(parsed);
     const t0 = Date.now();
     console.log(`[fwd] IN  ${req.method} ${req.url} model=${parsed.model || '?'}`);
+    if (logOutgoingBody) {
+      const preview = bodyStr.length > 8000 ? bodyStr.slice(0, 8000) + '…[truncated]' : bodyStr;
+      console.log(`[fwd] OUT ${preview}`);
+    }
 
     const incoming = {};
     for (const [k, v] of Object.entries(req.headers)) {

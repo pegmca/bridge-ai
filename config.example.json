@@ -4,6 +4,7 @@
     "port": 8787,
     "serverApiKey": "OPTIONAL-set-this-to-require-a-key-on-incoming-requests"
   },
+  "logOutgoingBody": false,
   "provider": {
     "protocol": "codebuddy-native",
     "hosts": ["wb.tencentbuddy.com", "copilot.tencent.com"],
