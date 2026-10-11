@@ -122,18 +122,42 @@ export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 - 流式响应在向上游发头前先窥探首段 SSE，遇错误事件则本账号内失败切换一次。
 - 个别网关节点会把 SSE 以「逗号分隔的 ASCII 码」形式返回，bridge 自动解码回正常 SSE。
 
-### 7. 腾讯云部署（私有暴露，不裸奔公网）
+### 7. 腾讯云部署
+
+两种暴露方式二选一。
+
+**(A) 私有隧道（推荐，无需开安全组）**
 
 ```bash
-# 镜像内监听 0.0.0.0:8787，安全组勿开放公网；用隧道暴露给本地 harness
+# 镜像内监听 0.0.0.0:8787，但安全组勿开放公网；用隧道暴露给本地 harness
 docker build -t bridge-ai .
 docker run -d -p 8787:8787 -v $PWD/config.json:/app/config.json bridge-ai
 ```
 
-本地用反向隧道暴露，harness 访问 `http://127.0.0.1:8787/v1`：
+本地反向隧道，harness 访问 `http://127.0.0.1:8787/v1`：
 
 ```bash
 ssh -N -L 8787:127.0.0.1:8787 tx        # 本地执行，tx=腾讯云别名
 ```
+
+**(B) 直接公网访问（需配合 serverApiKey 鉴权）**
+
+`config.json` 里设 `listen.host: "0.0.0.0"` 并设置访问密钥：
+
+```json
+"listen": { "host": "0.0.0.0", "port": 8787, "serverApiKey": "你的强随机密钥" }
+```
+
+bridge 收到任何请求（除 `/healthz`）都会校验密钥，缺失/错误返回 `401`：
+
+```bash
+curl http://43.130.49.34:8787/v1/chat/completions \
+  -H "Authorization: Bearer 你的强随机密钥" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"hy4-preview-f","messages":[{"role":"user","content":"hi"}]}'
+# 也可用 -H "x-api-key: 你的强随机密钥"
+```
+
+> **必须**：在腾讯云控制台的**安全组**中放行入站 TCP `8787`（主机 `ufw`/iptables 已确认无拦截，自连公网 IP 超时即为安全组未放行所致）。否则 `http://43.130.49.34:8787/...` 无法从外部连入。
 
 个人自用、私有链路；不接公网、不多人共用（反代复用订阅额度在厂商 ToS 属灰区）。

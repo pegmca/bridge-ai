@@ -1,5 +1,9 @@
 {
-  "listen": { "host": "127.0.0.1", "port": 8787 },
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8787,
+    "serverApiKey": "OPTIONAL-set-this-to-require-a-key-on-incoming-requests"
+  },
   "provider": {
     "protocol": "codebuddy-native",
     "hosts": ["wb.tencentbuddy.com", "copilot.tencent.com"],

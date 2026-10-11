@@ -54,6 +54,15 @@ export function createServer({ config, pool }) {
   const cooldownMs = (config.rotation && config.rotation.cooldownMs) || 3600000;
 
   const ctx = { hosts, identity };
+  // Optional gate for incoming requests (useful when bound to 0.0.0.0).
+  const serverKey = (config.listen && config.listen.serverApiKey) || config.serverApiKey || null;
+
+  function serverAuthOk(req) {
+    if (!serverKey) return true;
+    const auth = req.headers['authorization'];
+    const xkey = req.headers['x-api-key'];
+    return (auth && auth === `Bearer ${serverKey}`) || xkey === serverKey;
+  }
 
   async function handleChat(req, res) {
     let bodyStr = await readBody(req);
@@ -161,6 +170,16 @@ export function createServer({ config, pool }) {
   }
 
   const handler = (req, res) => {
+    if (req.url === '/healthz') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('ok');
+      return;
+    }
+    if (!serverAuthOk(req)) {
+      res.writeHead(401, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'unauthorized: missing or invalid server api key' } }));
+      return;
+    }
     if (req.method === 'POST' && req.url.startsWith('/v1/chat/completions')) {
       handleChat(req, res).catch((e) => {
         if (!res.headersSent) {
@@ -168,11 +187,6 @@ export function createServer({ config, pool }) {
           res.end(JSON.stringify({ error: { message: String((e && e.message) || e) } }));
         }
       });
-      return;
-    }
-    if (req.url === '/healthz') {
-      res.writeHead(200, { 'content-type': 'text/plain' });
-      res.end('ok');
       return;
     }
     res.writeHead(404, { 'content-type': 'application/json' });
