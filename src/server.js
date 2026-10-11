@@ -78,6 +78,8 @@ export function createServer({ config, pool }) {
     // Force streaming in the upstream body (non-stream is rejected upstream).
     parsed.stream = true;
     bodyStr = JSON.stringify(parsed);
+    const t0 = Date.now();
+    console.log(`[fwd] IN  ${req.method} ${req.url} model=${parsed.model || '?'}`);
 
     const incoming = {};
     for (const [k, v] of Object.entries(req.headers)) {
@@ -110,6 +112,7 @@ export function createServer({ config, pool }) {
             timeout,
           });
           clearError(account);
+          console.log(`[fwd] OK  account=${account.name} host=${host} status=${r.status} ${Date.now() - t0}ms`);
           return r;
         } catch (e) {
           lastErr = e;
@@ -154,6 +157,7 @@ export function createServer({ config, pool }) {
         });
       }
     } catch (e) {
+      console.log(`[fwd] ERR ${Date.now() - t0}ms ${e.message}`);
       if (e instanceof UpstreamHttpError) {
         res.writeHead(e.status >= 400 && e.status < 600 ? e.status : 502, {
           'content-type': 'application/json',
