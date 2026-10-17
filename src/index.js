@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createPool, poolStatus } from './accounts.js';
 import { createServer } from './server.js';
-import { resolveToken, scanToken } from './auth-codebuddy.js';
+import { resolveToken, scanToken, setRecaptureHandler } from './auth-codebuddy.js';
+import { runRecapture } from './recapture.js';
 import { expandHome, redact } from './util.js';
 
 const CONFIG_DEFAULT = path.join(process.cwd(), 'config.json');
@@ -53,6 +54,10 @@ function wireRefreshPersistence(pool, statePath) {
         state.accounts[a.name] = tok;
         saveState(statePath, state);
       };
+      a.auth._clearState = () => {
+        if (state.accounts) delete state.accounts[a.name];
+        saveState(statePath, state);
+      };
     }
   }
 }
@@ -83,6 +88,22 @@ async function main() {
   const cfg = loadConfig(configPath);
   const pool = createPool(cfg);
   wireRefreshPersistence(pool, statePathFor(configPath));
+
+  // Auto-recapture: when the upstream rejects our (rotated) refresh token, self-heal
+  // by re-running the MITM bootstrap. Requires root + the codebuddy CLI installed.
+  if (cfg.autoRecapture !== false) {
+    if (process.getuid?.() === 0) {
+      setRecaptureHandler(async (accountName) => {
+        console.log(`[bridge] auto-recapture triggered for ${accountName}`);
+        return await runRecapture({ configPath, accountName, log: (m) => console.log(m) });
+      });
+      console.log('[bridge] auto-recapture: enabled');
+    } else {
+      console.log('[bridge] auto-recapture: skipped (requires root)');
+    }
+  } else {
+    console.log('[bridge] auto-recapture: disabled by config');
+  }
 
   if (cmd === 'server') {
     const server = createServer({ config: cfg, pool });

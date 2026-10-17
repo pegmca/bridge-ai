@@ -74,6 +74,15 @@ The script auto-fills `accounts[].auth.refreshToken` and `userId`. After that th
 
 > Simpler alternative: generate an API key in the CodeBuddy console and use `mode:"apikey"`.
 
+### 2b. Automatic re-capture (self-healing)
+
+The offline refresh token can become invalid server-side over time (upstream returns `code=12153 "refresh token is invalid"`). To avoid manual intervention, the bridge can re-capture a fresh token on its own when that happens.
+
+- Enabled by `"autoRecapture": true` in `config.json` (default on). Requires the bridge to run as **root** and the `codebuddy` CLI to be logged in on the same machine.
+- When a refresh fails with `12153`, the bridge briefly runs the same MITM bootstrap as `scripts/capture-token.mjs`: it stops whatever holds `:443` (e.g. nginx), redirects `/etc/hosts`, intercepts one `codebuddy -p` call to grab a fresh `X-Refresh-Token`, writes it into `config.json`, then restores `/etc/hosts` and restarts the stopped service.
+- Safety: serialized (one MITM at a time) with a 10-minute cooldown after a failure, and it fails safe — if re-capture can't run, the original request fails rather than looping forever.
+- Disable with `"autoRecapture": false` if you prefer to re-capture manually.
+
 ### 3. Verify credentials
 
 ```bash
@@ -102,6 +111,15 @@ export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 - Upstream `401` → mark auth error and clear cache to re-mint token; `429` → mark quota exhausted, cool down for `rotation.cooldownMs`, then rotate to the next account.
 - For streaming responses, the first SSE chunk is peeked before headers are sent upstream; on an error event it fails over once within the same account.
 - A few gateway nodes return SSE as "comma-separated ASCII codes"; the bridge auto-decodes it back to normal SSE.
+
+### 6b. Upstream error codes you may see
+
+These come from CodeBuddy's API (in the `[fwd] ERR` line or the response body), not from the bridge:
+
+- `11102 "model [...] service info not found"` — the `model` you sent isn't available. Use a supported model (e.g. `hy4-preview-f`, `hy4-preview`, `hy3`).
+- `11134 "the model provider is temporarily unavailable"` — upstream provider is down/rate-limited; retry later or switch model.
+- `11128 "channel verification failed … not sent from an official client"` — the upstream gatekeeps **certain models** to the official client. It is model-specific and not caused by the bridge (valid models work fine through it). Switch to a supported model; if you must use that model, it may only be callable from the official CodeBuddy app.
+- `12153 "refresh token is invalid"` — the (rotated) refresh token was rejected. The bridge auto-recovers via auto-recapture (see 2b); if disabled, re-run `scripts/capture-token.mjs`.
 
 ### 7. Tencent Cloud deployment
 

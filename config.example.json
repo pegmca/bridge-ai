@@ -5,6 +5,7 @@
     "serverApiKey": "OPTIONAL-set-this-to-require-a-key-on-incoming-requests"
   },
   "logOutgoingBody": false,
+  "autoRecapture": true,
   "provider": {
     "protocol": "codebuddy-native",
     "hosts": ["wb.tencentbuddy.com", "copilot.tencent.com"],

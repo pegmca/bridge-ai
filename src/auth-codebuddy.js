@@ -66,7 +66,15 @@ export function refreshToken(account) {
   else importCache.delete(account.name);
 }
 
-async function resolveRefresh(account, auth, ctx) {
+// Optional self-heal hook: when the upstream rejects our (rotated) refresh token
+// (e.g. code=12153 "refresh token is invalid"), this is called to obtain a fresh
+// one. Set via setRecaptureHandler (see src/recapture.js).
+let recaptureHandler = null;
+export function setRecaptureHandler(fn) {
+  recaptureHandler = typeof fn === 'function' ? fn : null;
+}
+
+async function resolveRefresh(account, auth, ctx, attemptedRecapture = false) {
   const cached = refreshCache.get(account.name);
   if (cached && Date.now() < cached.exp) return cached.token;
 
@@ -105,7 +113,27 @@ async function resolveRefresh(account, auth, ctx) {
       lastErr = e;
     }
   }
-  if (!data) throw lastErr || new Error('token refresh failed');
+  if (!data) {
+    const invalid = lastErr && /refresh token is invalid|12153/.test(lastErr.message || '');
+    if (invalid && !attemptedRecapture && typeof recaptureHandler === 'function') {
+      try {
+        console.log(`[bridge] refresh token invalid (${lastErr.message}); attempting auto-recapture...`);
+        const fresh = await recaptureHandler(account.name);
+        if (fresh && fresh.refreshToken) {
+          auth.refreshToken = fresh.refreshToken;
+          if (fresh.userId) auth.userId = fresh.userId;
+          refreshCache.delete(account.name);
+          if (typeof auth._clearState === 'function') { try { auth._clearState(); } catch {} }
+          return resolveRefresh(account, auth, ctx, true);
+        }
+      } catch (re) {
+        throw new Error(
+          `token refresh failed and auto-recapture failed: ${re.message} (original: ${lastErr && lastErr.message})`
+        );
+      }
+    }
+    throw lastErr || new Error('token refresh failed');
+  }
 
   const expiresIn = data.expiresIn ? data.expiresIn - 120 : 7 * 24 * 3600;
   refreshCache.set(account.name, {
