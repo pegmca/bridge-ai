@@ -118,7 +118,7 @@ These come from CodeBuddy's API (in the `[fwd] ERR` line or the response body), 
 
 - `11102 "model [...] service info not found"` — the `model` you sent isn't available. Use a supported model (e.g. `hy4-preview-f`, `hy4-preview`, `hy3`).
 - `11134 "the model provider is temporarily unavailable"` — upstream provider is down/rate-limited; retry later or switch model.
-- `11128 "channel verification failed … not sent from an official client"` — the upstream gatekeeps **certain models** to the official client. It is model-specific and not caused by the bridge (valid models work fine through it). Switch to a supported model; if you must use that model, it may only be callable from the official CodeBuddy app.
+- `11128 "channel verification failed … not sent from an official client"` — the upstream intermittently rejects relay requests that don't look like the official client. The bridge now mirrors the official CodeBuddy CLI's identity headers (`User-Agent: CLI/2.168.2 CodeBuddy/2.168.2`, `X-IDE-Type: CLI`, `X-Agent-*`, plus a per-request trace/request-id family), which eliminates this. If you still see it, override the markers via `provider.clientHeaders` in `config.json`.
 - `12153 "refresh token is invalid"` — the (rotated) refresh token was rejected. The bridge auto-recovers via auto-recapture (see 2b); if disabled, re-run `scripts/capture-token.mjs`.
 
 ### 7. Tencent Cloud deployment

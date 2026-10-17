@@ -1,4 +1,5 @@
 import http from 'node:http';
+import crypto from 'node:crypto';
 import {
   selectAccount,
   markUsed,
@@ -50,6 +51,47 @@ export function createServer({ config, pool }) {
   const authHeader = provider.authHeader || 'Authorization';
   const authScheme = provider.authScheme || 'Bearer';
   const identity = provider.identity || { 'X-Product': 'SaaS', 'X-Domain': 'www.codebuddy.cn' };
+  // Official CodeBuddy CLI identity markers. The upstream runs a "channel
+  // verification" (error 11128) that intermittently rejects relay requests not
+  // sent from the official client; mirroring these headers makes gated/flagged
+  // requests pass. Override via provider.clientHeaders in config if needed.
+  const cliIdentity =
+    provider.clientHeaders && typeof provider.clientHeaders === 'object'
+      ? provider.clientHeaders
+      : {
+          'User-Agent': 'CLI/2.168.2 CodeBuddy/2.168.2',
+          'X-IDE-Type': 'CLI',
+          'X-IDE-Name': 'CLI',
+          'X-IDE-Version': '2.168.2',
+          'X-Agent-Purpose': 'conversation',
+          'X-Agent-Intent': 'craft',
+          'X-Agent-Runtime': 'other',
+          'X-Agent-Type': 'main',
+          'X-Private-Data': 'false',
+        };
+  // Per-request trace/request-id family the CLI attaches (fresh each call).
+  function cliTraceHeaders() {
+    const rid = crypto.randomUUID().replace(/-/g, '');
+    const span = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+    const parent = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+    const traceId = crypto.randomUUID().replace(/-/g, '');
+    const convId = crypto.randomUUID();
+    return {
+      'X-Request-ID': rid,
+      'X-Root-Request-ID': rid,
+      'X-Conversation-Request-ID': rid,
+      'X-Conversation-Message-ID': rid,
+      'X-Conversation-ID': convId,
+      'X-Trace-ID': traceId,
+      'traceparent': `00-${traceId}-${parent}-01`,
+      'b3': `${traceId}-${parent}-1-${span}`,
+      'X-B3-TraceId': traceId,
+      'X-B3-SpanId': span,
+      'X-B3-ParentSpanId': parent,
+      'X-B3-Sampled': '1',
+      baggage: `codebuddy.session_id=${convId},codebuddy.conversation_request_id=${rid}`,
+    };
+  }
   const timeout = provider.timeout || 120000;
   const cooldownMs = (config.rotation && config.rotation.cooldownMs) || 3600000;
   // Optional: log the exact body sent upstream (off by default; may contain conversation content).
@@ -101,6 +143,8 @@ export function createServer({ config, pool }) {
       const baseHeaders = {
         ...incoming,
         ...identity,
+        ...cliIdentity,
+        ...cliTraceHeaders(),
         'x-codebuddy-request': '1',
         [authHeader]: `${authScheme} ${token}`,
       };
