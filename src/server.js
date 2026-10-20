@@ -24,6 +24,12 @@ const HOP_BY_HOP = new Set([
   'upgrade',
 ]);
 
+// Client headers that are safe to relay upstream. Everything else is dropped —
+// in particular x-api-key / authorization (they authenticate to *this* bridge)
+// and SDK-specific markers (x-stainless-*, openai-*) that make the upstream
+// treat the call as a non-official client.
+const FORWARDABLE = new Set(['content-type', 'accept', 'accept-language']);
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -138,14 +144,21 @@ export function createServer({ config, pool }) {
     bodyStr = JSON.stringify(parsed);
     const t0 = Date.now();
     console.log(`[fwd] IN  ${req.method} ${req.url} model=${parsed.model || '?'}`);
+    if (config.logIncomingHeaders) {
+      console.log(`[fwd] HDR ${Object.keys(req.headers).sort().join(',')}`);
+    }
     if (logOutgoingBody) {
       const preview = bodyStr.length > 8000 ? bodyStr.slice(0, 8000) + '…[truncated]' : bodyStr;
       console.log(`[fwd] OUT ${preview}`);
     }
 
+    // Copy only benign payload headers upstream. Never forward the headers used
+    // to gate *this* bridge (x-api-key / authorization) or arbitrary client
+    // markers: the upstream rejects requests carrying unexpected auth headers
+    // (401 invalid_format) and its channel check is sensitive to stray headers.
     const incoming = {};
     for (const [k, v] of Object.entries(req.headers)) {
-      if (!HOP_BY_HOP.has(k.toLowerCase())) incoming[k] = v;
+      if (FORWARDABLE.has(k.toLowerCase())) incoming[k] = v;
     }
 
     const attempt = async (attempted) => {
@@ -154,6 +167,7 @@ export function createServer({ config, pool }) {
       attempted.add(account);
       markUsed(account);
       const token = await resolveToken(account, ctx);
+      const uid = (account.auth && account.auth.userId) || ctx.userId;
       let lastErr;
       // Round 0 is the normal try; later rounds replay the same payload with new
       // trace headers to get past an intermittent 11128 channel-verification block.
@@ -167,6 +181,9 @@ export function createServer({ config, pool }) {
           const headers = {
             ...incoming,
             ...identity,
+            // The official CLI sends the account's user id on chat calls too;
+            // omitting it is one of the signals its channel check looks at.
+            ...(uid ? { 'X-User-Id': uid } : {}),
             ...cliIdentity,
             ...cliTraceHeaders(),
             'x-codebuddy-request': '1',

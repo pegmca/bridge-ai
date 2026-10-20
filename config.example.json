@@ -5,6 +5,7 @@
     "serverApiKey": "OPTIONAL-set-this-to-require-a-key-on-incoming-requests"
   },
   "logOutgoingBody": false,
+  "logIncomingHeaders": false,
   "autoRecapture": true,
   "provider": {
     "protocol": "codebuddy-native",
