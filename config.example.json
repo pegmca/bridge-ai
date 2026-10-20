@@ -6,6 +6,15 @@
   },
   "logOutgoingBody": false,
   "logIncomingHeaders": false,
+  "sanitize": {
+    "enabled": false,
+    "rules": [
+      {
+        "find": "You are an AI agent powered by DeepSeek Harness",
+        "replace": "You are an AI agent"
+      }
+    ]
+  },
   "autoRecapture": true,
   "provider": {
     "protocol": "codebuddy-native",

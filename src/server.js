@@ -117,6 +117,14 @@ export function createServer({ config, pool }) {
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  // config.sanitize.rules: [{ find, replace }] applied to message contents.
+  const sanitizeCfg = config.sanitize || {};
+  const sanitizeRules = sanitizeCfg.enabled
+    ? (sanitizeCfg.rules || []).filter(
+        (r) => r && typeof r.find === 'string' && r.find && typeof r.replace === 'string'
+      )
+    : [];
+
   const ctx = { hosts, identity };
   // Optional gate for incoming requests (useful when bound to 0.0.0.0).
   const serverKey = (config.listen && config.listen.serverApiKey) || config.serverApiKey || null;
@@ -141,15 +149,36 @@ export function createServer({ config, pool }) {
     const stream = true; // CodeBuddy chat API only supports streaming
     // Force streaming in the upstream body (non-stream is rejected upstream).
     parsed.stream = true;
-    bodyStr = JSON.stringify(parsed);
     const t0 = Date.now();
-    console.log(`[fwd] IN  ${req.method} ${req.url} model=${parsed.model || '?'}`);
+    const rid = crypto.randomUUID().slice(0, 8);
+
+    // The upstream fingerprints the system prompt of known agent harnesses: a
+    // prompt opening with e.g. "You are an AI agent powered by DeepSeek
+    // Harness." is rejected with 11128 regardless of headers. Optional rewrite
+    // rules (config.sanitize) neutralise those signatures.
+    let sanitized = 0;
+    if (sanitizeRules.length && Array.isArray(parsed.messages)) {
+      for (const m of parsed.messages) {
+        if (typeof m.content !== 'string') continue;
+        for (const rule of sanitizeRules) {
+          if (!m.content.includes(rule.find)) continue;
+          m.content = m.content.split(rule.find).join(rule.replace);
+          sanitized += 1;
+        }
+      }
+    }
+
+    bodyStr = JSON.stringify(parsed);
+    console.log(`[fwd] IN  [${rid}] ${req.method} ${req.url} model=${parsed.model || '?'} bytes=${Buffer.byteLength(bodyStr)}`);
+    if (sanitized) console.log(`[fwd] SAN [${rid}] rewrote ${sanitized} prompt fragment(s)`);
     if (config.logIncomingHeaders) {
-      console.log(`[fwd] HDR ${Object.keys(req.headers).sort().join(',')}`);
+      console.log(`[fwd] HDR [${rid}] ${Object.keys(req.headers).sort().join(',')}`);
     }
     if (logOutgoingBody) {
-      const preview = bodyStr.length > 8000 ? bodyStr.slice(0, 8000) + '…[truncated]' : bodyStr;
-      console.log(`[fwd] OUT ${preview}`);
+      // logOutgoingBody: true -> first 8KB; "full" -> everything.
+      const limit = config.logOutgoingBody === 'full' ? Infinity : 8000;
+      const preview = bodyStr.length > limit ? bodyStr.slice(0, limit) + '…[truncated]' : bodyStr;
+      console.log(`[fwd] OUT [${rid}] ${preview}`);
     }
 
     // Copy only benign payload headers upstream. Never forward the headers used
@@ -173,7 +202,7 @@ export function createServer({ config, pool }) {
       // trace headers to get past an intermittent 11128 channel-verification block.
       for (let round = 0; round <= verifyRetries; round++) {
         if (round > 0) {
-          console.log(`[fwd] 11128 retry ${round}/${verifyRetries} account=${account.name}`);
+          console.log(`[fwd] 11128 retry ${round}/${verifyRetries} [${rid}] account=${account.name}`);
           await sleep(200 + Math.floor(Math.random() * 300) * round);
         }
         let blocked = false;
@@ -201,7 +230,7 @@ export function createServer({ config, pool }) {
               timeout,
             });
             clearError(account);
-            console.log(`[fwd] OK  account=${account.name} host=${host} status=${r.status} ${Date.now() - t0}ms`);
+            console.log(`[fwd] OK  [${rid}] account=${account.name} host=${host} status=${r.status} ${Date.now() - t0}ms`);
             return r;
           } catch (e) {
             lastErr = e;
@@ -255,7 +284,7 @@ export function createServer({ config, pool }) {
         });
       }
     } catch (e) {
-      console.log(`[fwd] ERR ${Date.now() - t0}ms ${e.message}`);
+      console.log(`[fwd] ERR [${rid}] ${Date.now() - t0}ms ${e.message}`);
       if (e instanceof UpstreamHttpError) {
         res.writeHead(e.status >= 400 && e.status < 600 ? e.status : 502, {
           'content-type': 'application/json',
