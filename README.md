@@ -55,6 +55,9 @@ Key fields in `config.json`:
 
 - `provider.hosts` / `provider.path`: upstream host array + path. `hosts` defaults to `["wb.tencentbuddy.com","copilot.tencent.com"]`, `path` defaults to `/v2/chat/completions`.
 - `provider.identity`: identity headers to inject (defaults to `X-Product: SaaS`, `X-Domain: www.codebuddy.cn`).
+- `provider.channelVerifyRetries`: how many times to replay a request blocked by `11128` with fresh trace ids (default `3`).
+- `sanitize`: `{ "enabled": true, "rules": [{ "find": "…", "replace": "…" }] }` — rewrites matching fragments in `messages[].content` before forwarding. Needed when a client's system prompt matches a fingerprint the upstream rejects with `11128` (see 6b).
+- Only `content-type`, `accept` and `accept-language` from the incoming request are relayed upstream; everything else (notably the `x-api-key`/`Authorization` used to gate this bridge) is dropped.
 - `accounts[]`: the account pool, supporting several auth modes:
   - `{ "mode": "refresh", "refreshToken": "…", "userId": "…" }` —— **recommended**. Uses the offline refresh token to mint an access token, auto-rotates and persists to `bridge.state.json`, self-sustaining long-term. (See "Capture refresh token" below.)
   - `{ "mode": "apikey", "apiKey": "…" }` —— an API key generated in the CodeBuddy console; simplest and most durable.
@@ -118,7 +121,9 @@ These come from CodeBuddy's API (in the `[fwd] ERR` line or the response body), 
 
 - `11102 "model [...] service info not found"` — the `model` you sent isn't available. Use a supported model (e.g. `hy4-preview-f`, `hy4-preview`, `hy3`).
 - `11134 "the model provider is temporarily unavailable"` — upstream provider is down/rate-limited; retry later or switch model.
-- `11128 "channel verification failed … not sent from an official client"` — the upstream probabilistically rejects relay requests that don't look like the official client (it is per-request, not per-account, and its own message says "Please send it again"). The bridge mirrors the official CodeBuddy CLI's identity headers (`User-Agent: CLI/2.168.2 CodeBuddy/2.168.2`, `X-IDE-Type: CLI`, `X-Agent-*`), attaches a fresh per-request trace/request-id family, and automatically replays the request with new trace IDs when it still hits 11128 (`provider.channelVerifyRetries`, default `3`; the account is never put on cooldown for this). If you still see it, raise the retry count or override the markers via `provider.clientHeaders` in `config.json`.
+- `11128 "channel verification failed … not sent from an official client"` — the upstream rejects the call. Two distinct causes, both handled:
+  - **Prompt fingerprint (the common one).** A system prompt that *opens* with a known agent-harness signature (e.g. `You are an AI agent powered by DeepSeek Harness`) is rejected every time, regardless of headers — prefixing anything, or changing one word, makes it pass. `config.sanitize` rewrites configured fragments before forwarding; each rewrite is logged as `[fwd] SAN [<rid>] rewrote N prompt fragment(s)`.
+  - **Probabilistic per-request gate.** Occasionally a normal request is rejected ("Please send it again"). The bridge mirrors the official CLI identity headers (`User-Agent: CLI/2.168.2 CodeBuddy/2.168.2`, `X-IDE-Type: CLI`, `X-Agent-*`, `X-User-Id`) and a fresh per-request trace/request-id family, then replays with new trace IDs (`provider.channelVerifyRetries`, default `3`). The account is never put on cooldown for 11128.
 - `12153 "refresh token is invalid"` — the (rotated) refresh token was rejected. The bridge auto-recovers via auto-recapture (see 2b); if disabled, re-run `scripts/capture-token.mjs`.
 
 ### 7. Tencent Cloud deployment
@@ -170,14 +175,16 @@ ssh tx "tail -f /opt/bridge-ai/bridge.log"      # live tail
 ssh tx "grep '\[fwd\]' /opt/bridge-ai/bridge.log"   # forwarding records only
 ```
 
-Two lines per request:
+Two lines per request, tagged with a short request id so concurrent calls stay distinguishable:
 
 ```
-[fwd] IN  POST /v1/chat/completions model=hy4-preview-f
-[fwd] OK  account=cb-1 host=wb.tencentbuddy.com status=200 2347ms
+[fwd] IN  [737826a7] POST /v1/chat/completions model=hy4-preview-f bytes=3120
+[fwd] OK  [737826a7] account=cb-1 host=wb.tencentbuddy.com status=200 2347ms
 ```
 
 - `IN` = request received; `OK`/`ERR` = forwarding result (`account`/`host`/`status`/latency).
+- `[fwd] SAN [<rid>] rewrote N prompt fragment(s)` appears when a `config.sanitize` rule matched.
+- `[fwd] 11128 retry N/M [<rid>] account=...` appears when a channel-verification block is being replayed.
 - The upstream error response body (first 500 chars) is appended to the `ERR` line.
 - **Conversation content is not logged by default.** To verify the bridge isn't injecting anything, enable at the top level of `config.json`:
 
@@ -185,4 +192,4 @@ Two lines per request:
 "logOutgoingBody": true
 ```
 
-When enabled, an extra `[fwd] OUT <actual body sent upstream>` line (truncated to 8KB) is logged per request, proving the bridge only passes through your `messages`. **Note**: this persists your conversation content to disk — enable only temporarily for debugging, then set it back to `false`.
+When enabled, an extra `[fwd] OUT <actual body sent upstream>` line (truncated to 8KB) is logged per request; use `"full"` instead of `true` to log the whole body. There is also `"logIncomingHeaders": true` to record the *names* of the client headers received. **Note**: these persist your conversation content to disk — enable only temporarily for debugging, then set them back to `false`.
