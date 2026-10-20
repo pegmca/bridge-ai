@@ -13,6 +13,7 @@
     "authHeader": "Authorization",
     "authScheme": "Bearer",
     "identity": { "X-Product": "SaaS", "X-Domain": "www.codebuddy.cn" },
+    "channelVerifyRetries": 3,
     "timeout": 120000
   },
   "rotation": {

@@ -96,6 +96,20 @@ export function createServer({ config, pool }) {
   const cooldownMs = (config.rotation && config.rotation.cooldownMs) || 3600000;
   // Optional: log the exact body sent upstream (off by default; may contain conversation content).
   const logOutgoingBody = !!(config.logOutgoingBody);
+  // Upstream "channel verification" (11128) is probabilistic per request and its
+  // own message says "Please send it again". Retry with a fresh trace/request-id
+  // set; it is NOT an account problem, so never put the account on cooldown.
+  const verifyRetries = Number.isFinite(provider.channelVerifyRetries)
+    ? provider.channelVerifyRetries
+    : 3;
+
+  function isChannelVerify(e) {
+    if (!(e instanceof UpstreamHttpError)) return false;
+    const m = String(e.message || '');
+    return m.includes('11128') || /unapproved channel/i.test(m);
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const ctx = { hosts, identity };
   // Optional gate for incoming requests (useful when bound to 0.0.0.0).
@@ -140,53 +154,70 @@ export function createServer({ config, pool }) {
       attempted.add(account);
       markUsed(account);
       const token = await resolveToken(account, ctx);
-      const baseHeaders = {
-        ...incoming,
-        ...identity,
-        ...cliIdentity,
-        ...cliTraceHeaders(),
-        'x-codebuddy-request': '1',
-        [authHeader]: `${authScheme} ${token}`,
-      };
       let lastErr;
-      for (const host of hosts) {
-        const headers = { ...baseHeaders, host };
-        try {
-          const r = await forwardRequest({
-            baseUrl: `https://${host}`,
-            path: upstreamPath,
-            method: 'POST',
-            headers,
-            bodyStr,
-            stream,
-            timeout,
-          });
-          clearError(account);
-          console.log(`[fwd] OK  account=${account.name} host=${host} status=${r.status} ${Date.now() - t0}ms`);
-          return r;
-        } catch (e) {
-          lastErr = e;
-          if (e instanceof UpstreamHttpError) {
-            const cls = classifyStatus(e.status);
-            if (cls === 'auth') {
-              refreshToken(account); // drop cached token; next resolve re-reads
-              markAuthError(account, `status ${e.status}`);
-              break; // auth error is account-level, don't retry other hosts
-            }
-            // host-level failure -> try next host
-          }
-          // fall through to next host
+      // Round 0 is the normal try; later rounds replay the same payload with new
+      // trace headers to get past an intermittent 11128 channel-verification block.
+      for (let round = 0; round <= verifyRetries; round++) {
+        if (round > 0) {
+          console.log(`[fwd] 11128 retry ${round}/${verifyRetries} account=${account.name}`);
+          await sleep(200 + Math.floor(Math.random() * 300) * round);
         }
+        let blocked = false;
+        for (const host of hosts) {
+          const headers = {
+            ...incoming,
+            ...identity,
+            ...cliIdentity,
+            ...cliTraceHeaders(),
+            'x-codebuddy-request': '1',
+            [authHeader]: `${authScheme} ${token}`,
+            host,
+          };
+          try {
+            const r = await forwardRequest({
+              baseUrl: `https://${host}`,
+              path: upstreamPath,
+              method: 'POST',
+              headers,
+              bodyStr,
+              stream,
+              timeout,
+            });
+            clearError(account);
+            console.log(`[fwd] OK  account=${account.name} host=${host} status=${r.status} ${Date.now() - t0}ms`);
+            return r;
+          } catch (e) {
+            lastErr = e;
+            if (isChannelVerify(e)) {
+              blocked = true;
+              continue; // retryable at request level, not host/account level
+            }
+            if (e instanceof UpstreamHttpError) {
+              const cls = classifyStatus(e.status);
+              if (cls === 'auth') {
+                refreshToken(account); // drop cached token; next resolve re-reads
+                markAuthError(account, `status ${e.status}`);
+                break; // auth error is account-level, don't retry other hosts
+              }
+              // host-level failure -> try next host
+            }
+            // fall through to next host
+          }
+        }
+        if (!blocked) break;
       }
       if (lastErr) {
         if (lastErr instanceof UpstreamHttpError) {
-          const cls = classifyStatus(lastErr.status);
-          if (cls === 'quota') markExhausted(account, cooldownMs);
-          else markExhausted(account, Math.min(cooldownMs, 60000));
+          // 11128 is a per-request gate failure: do not penalise the account.
+          if (!isChannelVerify(lastErr)) {
+            const cls = classifyStatus(lastErr.status);
+            if (cls === 'quota') markExhausted(account, cooldownMs);
+            else markExhausted(account, Math.min(cooldownMs, 60000));
+          }
         } else if (lastErr instanceof UpstreamStreamError) {
           markExhausted(account, cooldownMs);
         }
-        if (attempted.size < pool.length) return attempt(attempted);
+        if (!isChannelVerify(lastErr) && attempted.size < pool.length) return attempt(attempted);
         throw lastErr;
       }
     };
