@@ -12,6 +12,10 @@
       {
         "find": "You are an AI agent powered by DeepSeek Harness",
         "replace": "You are an AI agent"
+      },
+      {
+        "find": "DeepSeek Harness",
+        "replace": "Agent Harness"
       }
     ]
   },

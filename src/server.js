@@ -1,5 +1,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   selectAccount,
   markUsed,
@@ -170,6 +172,14 @@ export function createServer({ config, pool }) {
 
     bodyStr = JSON.stringify(parsed);
     console.log(`[fwd] IN  [${rid}] ${req.method} ${req.url} model=${parsed.model || '?'} bytes=${Buffer.byteLength(bodyStr)}`);
+    if (config.dumpBodyDir) {
+      try {
+        fs.mkdirSync(config.dumpBodyDir, { recursive: true });
+        fs.writeFileSync(path.join(config.dumpBodyDir, `${rid}.json`), bodyStr);
+      } catch (e) {
+        console.log(`[fwd] dump failed: ${e.message}`);
+      }
+    }
     if (sanitized) console.log(`[fwd] SAN [${rid}] rewrote ${sanitized} prompt fragment(s)`);
     if (config.logIncomingHeaders) {
       console.log(`[fwd] HDR [${rid}] ${Object.keys(req.headers).sort().join(',')}`);
