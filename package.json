@@ -11,8 +11,10 @@
     "node": ">=18"
   },
   "scripts": {
-    "start": "node src/index.js server",
+    "start": "node scripts/svc.mjs start",
     "login": "node src/index.js login",
-    "status": "node src/index.js status"
+    "status": "node scripts/svc.mjs status",
+    "stop": "node scripts/svc.mjs stop",
+    "restart": "node scripts/svc.mjs restart"
   }
 }
