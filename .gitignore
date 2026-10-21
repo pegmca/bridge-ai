@@ -15,3 +15,6 @@ tmp/
 # debugging / capture scripts (temporary, contain secrets) — root level only
 /*.mjs
 /findtok.py
+
+# environment-specific local docs (LAN IP, local run notes)
+README.local.md
