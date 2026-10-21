@@ -9,6 +9,9 @@ bridge.state.json
 # node
 node_modules/
 
+# scratch space for probes / intermediate artifacts
+tmp/
+
 # debugging / capture scripts (temporary, contain secrets) — root level only
 /*.mjs
 /findtok.py
