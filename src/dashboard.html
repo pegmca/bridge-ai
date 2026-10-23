@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bridge-ai · 账号池</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #151a22;
+    --panel-2: #1a2029;
+    --line: #242b36;
+    --text: #e6e9ef;
+    --muted: #8b93a4;
+    --dim: #5f6779;
+    --accent: #4b8bf5;
+    --ok: #35c98a;
+    --warn: #e0a83c;
+    --err: #ef6060;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 24px 48px;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: .2px; }
+  .sub { margin-top: 6px; color: var(--muted); font-size: 12.5px; font-family: var(--mono); }
+  .sub b { color: var(--text); font-weight: 500; }
+  .actions { display: flex; align-items: center; gap: 8px; }
+  button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 7px; padding: 6px 12px; font-size: 12.5px; cursor: pointer;
+    font-family: inherit; transition: border-color .15s, color .15s;
+  }
+  button:hover { border-color: #3a4558; }
+  button.primary { border-color: #2f4f86; color: #cfe0ff; }
+  .toggle { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; user-select: none; }
+  .toggle input { accent-color: var(--accent); }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin: 20px 0 18px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .card .k { color: var(--muted); font-size: 11.5px; letter-spacing: .3px; }
+  .card .v { font-size: 21px; font-weight: 500; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .card .v small { font-size: 12px; color: var(--dim); font-weight: 400; margin-left: 4px; }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .panel-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .panel-head h2 { margin: 0; font-size: 13px; font-weight: 500; color: var(--muted); letter-spacing: .3px; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left; font-weight: 500; color: var(--dim); font-size: 11.5px;
+    padding: 9px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; background: #121721;
+  }
+  td { padding: 11px 14px; border-bottom: 1px solid #1c222c; vertical-align: middle; white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #171d26; }
+  .name { font-family: var(--mono); font-size: 13px; }
+  .next { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px;
+          font-size: 10.5px; color: #a8c6ff; background: #1d2c47; border: 1px solid #2b4470; }
+  .badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px;
+           font-size: 11.5px; border: 1px solid transparent; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .s-available { color: var(--ok); background: #12291f; border-color: #1d4531; }
+  .s-available .dot { background: var(--ok); }
+  .s-busy { color: #8fb8ff; background: #16243a; border-color: #24395c; }
+  .s-busy .dot { background: #6ea2ff; }
+  .s-cooling { color: var(--warn); background: #2b2213; border-color: #4a3a1a; }
+  .s-cooling .dot { background: var(--warn); }
+  .uid { font-family: var(--mono); font-size: 12px; color: #c3cad8; cursor: pointer; }
+  .uid:hover { color: #fff; text-decoration: underline dotted; }
+  .mode { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .num { font-variant-numeric: tabular-nums; color: #cdd4e1; }
+  .num .e { color: var(--err); }
+  .muted { color: var(--dim); }
+  .err-line { color: #f19a9a; font-family: var(--mono); font-size: 11.5px; max-width: 260px;
+              overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: bottom; }
+
+  .notice { margin-top: 14px; padding: 10px 14px; border-radius: 9px; font-size: 12.5px;
+            border: 1px solid #4a3a1a; background: #241d10; color: #e5c483; }
+  .notice.err { border-color: #4d2222; background: #241314; color: #f0a0a0; }
+  .hidden { display: none !important; }
+
+  .gate { position: fixed; inset: 0; background: rgba(9,11,15,.86); display: flex;
+          align-items: center; justify-content: center; padding: 20px; backdrop-filter: blur(3px); }
+  .gate form { width: 360px; background: var(--panel); border: 1px solid var(--line);
+               border-radius: 14px; padding: 22px; }
+  .gate h3 { margin: 0 0 4px; font-size: 15px; font-weight: 500; }
+  .gate p { margin: 0 0 16px; color: var(--muted); font-size: 12.5px; }
+  .gate input {
+    width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--line);
+    background: #0f141b; color: var(--text); font-family: var(--mono); font-size: 12.5px; outline: none;
+  }
+  .gate input:focus { border-color: #35507d; }
+  .gate .row { display: flex; gap: 8px; margin-top: 14px; }
+  .gate .row button { flex: 1; padding: 8px; }
+  .gate form.wide { width: 520px; }
+  .field { display: block; margin-top: 12px; }
+  .field > span { display: block; margin-bottom: 5px; color: var(--muted); font-size: 12px; }
+  .field select, .field textarea, .field input {
+    width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: #0f141b; color: var(--text); font-family: var(--mono); font-size: 12.5px; outline: none;
+  }
+  .field textarea { resize: vertical; min-height: 84px; line-height: 1.5; word-break: break-all; }
+  .field select:focus, .field textarea:focus { border-color: #35507d; }
+  .gate .toggle { margin-top: 12px; }
+  .token {
+    display: block; max-height: 92px; overflow: auto; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--line); background: #0f141b; color: #dbe4f2;
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.5; word-break: break-all; white-space: pre-wrap;
+  }
+  .token-meta { margin-top: 6px; color: var(--dim); font-size: 11.5px; font-family: var(--mono); }
+  .msg { margin-top: 12px; padding: 8px 10px; border-radius: 8px; font-size: 12.5px;
+         border: 1px solid #1d4531; background: #12291f; color: #86dcb4; word-break: break-word;
+         white-space: pre-line; }
+  .msg.err { border-color: #4d2222; background: #241314; color: #f0a0a0; }
+  .linkbtn { background: none; border: none; padding: 0; color: var(--dim); font-size: 11.5px; cursor: pointer; }
+  .linkbtn:hover { color: var(--muted); text-decoration: underline dotted; }
+  footer .left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  footer { margin-top: 18px; color: var(--dim); font-size: 11.5px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>账号池 · 当前登录账号</h1>
+      <div class="sub" id="serverLine">连接中…</div>
+    </div>
+    <div class="actions">
+      <label class="toggle"><input type="checkbox" id="auto" checked> 自动刷新</label>
+      <button id="refresh">刷新</button>
+      <button id="changeJwt" class="primary">访问密钥</button>
+    </div>
+  </header>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>账号</h2>
+      <span class="muted" id="updated" style="font-size:11.5px"></span>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>名称</th><th>模式</th><th>身份 user id</th><th>状态</th>
+            <th>并发</th><th>请求 / 成功 / 失败</th><th>最近使用</th><th>凭证到期</th><th>最近错误</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="notice"></div>
+
+  <footer>
+    <span class="left">
+      <span>GET /admin/pool 提供同样的 JSON；数据来自进程内存，重启即清零。</span>
+      <button type="button" class="linkbtn" id="setKey">解锁此浏览器</button>
+    </span>
+    <span id="foot"></span>
+  </footer>
+</div>
+
+<div class="gate hidden" id="gate">
+  <form id="gateForm">
+    <h3>解锁这个浏览器</h3>
+    <p>本机（127.0.0.1）访问不需要密钥；从其他机器打开时才要。密钥可在右上角「访问密钥」里查看或修改，这里填的只保存在本机浏览器。</p>
+    <input id="keyInput" type="password" placeholder="serverApiKey" autocomplete="off" spellcheck="false">
+    <div class="row">
+      <button type="button" id="gateCancel">取消</button>
+      <button type="submit" class="primary">连接</button>
+    </div>
+  </form>
+</div>
+
+<div class="gate hidden" id="keyDialog">
+  <form id="keyForm" class="wide">
+    <h3>访问密钥</h3>
+    <p>客户端调用本服务时带的那个 key。改完立即生效，不用重启；保存后本浏览器也会自动换用新的。</p>
+    <div class="field">
+      <span>当前密钥</span>
+      <code class="token" id="keyValue">读取中…</code>
+      <div class="token-meta" id="keyMeta"></div>
+    </div>
+    <label class="field">
+      <span>新密钥（留空则不改；可点「随机」生成一个）</span>
+      <input id="keyNew" type="text" placeholder="16 位以上，字母数字或 . _ ~ + / -" autocomplete="off" spellcheck="false">
+    </label>
+    <div class="msg hidden" id="keyMsg"></div>
+    <div class="row">
+      <button type="button" id="keyCopy">复制当前</button>
+      <button type="button" id="keyRand">随机</button>
+      <button type="submit" class="primary" id="keySave">保存并生效</button>
+      <button type="button" id="keyClose">关闭</button>
+    </div>
+  </form>
+</div>
+
+<script>
+(function () {
+  var KEY_STORE = 'bridge.adminKey';
+  var state = { key: localStorage.getItem(KEY_STORE) || '', timer: null, data: null, gate: null, gateAuto: false, serverKey: '' };
+
+  // Allow ?key= for a one-off deep link, then keep it out of the address bar.
+  (function () {
+    var q = new URLSearchParams(location.search).get('key');
+    if (!q) return;
+    state.key = q;
+    localStorage.setItem(KEY_STORE, q);
+    history.replaceState(null, '', location.pathname);
+  })();
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  function fmtAgo(ms) {
+    if (ms == null) return '-';
+    var s = Math.max(0, Math.floor(ms / 1000));
+    if (s < 60) return s + ' 秒前';
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + ' 分钟前';
+    var h = Math.floor(m / 60);
+    if (h < 48) return h + ' 小时前';
+    return Math.floor(h / 24) + ' 天前';
+  }
+  function fmtLeft(ms) {
+    if (ms == null) return '-';
+    if (ms <= 0) return '已过期';
+    var s = Math.floor(ms / 1000);
+    if (s < 60) return s + ' 秒';
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + ' 分';
+    var h = Math.floor(m / 60);
+    if (h < 48) return h + ' 小时' + (m % 60 ? ' ' + (m % 60) + ' 分' : '');
+    return Math.floor(h / 24) + ' 天 ' + (h % 24) + ' 小时';
+  }
+  function fmtUptime(ms) {
+    if (ms == null) return 'n/a';
+    var s = Math.floor(ms / 1000), d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+    if (d) return d + 'd ' + h + 'h';
+    if (h) return h + 'h ' + m + 'm';
+    return m + 'm ' + (s % 60) + 's';
+  }
+  function clock(ts) {
+    if (!ts) return '-';
+    var d = new Date(ts);
+    var p = function (n) { return String(n).padStart(2, '0'); };
+    return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+  function cell(row, text, cls) {
+    var td = document.createElement('td');
+    if (cls) td.className = cls;
+    if (text && text.nodeType) td.appendChild(text); else td.textContent = text;
+    row.appendChild(td);
+    return td;
+  }
+
+  // Which overlay is open: 'unlock' = type the key into this browser,
+  // 'manage' = view / rotate the service's key. A dialog the user opened is
+  // never closed by the 3s refresh; only the 401-driven unlock prompt is.
+  function gateState() { return state.gate || null; }
+
+  function openUnlockGate(msg, auto) {
+    state.gate = 'unlock';
+    state.gateAuto = auto === true;
+    $('keyDialog').classList.add('hidden');
+    $('gate').classList.remove('hidden');
+    if (msg) $('keyInput').placeholder = msg;
+    if (!state.gateAuto) {
+      $('keyInput').value = '';
+      $('keyInput').focus();
+    }
+  }
+
+  function openKeyDialog() {
+    state.gate = 'manage';
+    state.gateAuto = false;
+    $('gate').classList.add('hidden');
+    $('keyDialog').classList.remove('hidden');
+    $('keyNew').value = '';
+    setMsg('', null);
+    loadServerKey();
+  }
+
+  function closeGate() {
+    state.gate = null;
+    state.gateAuto = false;
+    $('gate').classList.add('hidden');
+    $('keyDialog').classList.add('hidden');
+    schedule();
+  }
+
+  function setMsg(text, isErr) {
+    var m = $('keyMsg');
+    if (!text) {
+      m.className = 'msg hidden';
+      m.textContent = '';
+      return;
+    }
+    m.textContent = text;
+    m.className = 'msg' + (isErr ? ' err' : '');
+  }
+
+  // Clipboard API needs a secure context (127.0.0.1 counts, a LAN IP over http
+  // does not), so keep the old textarea trick as a fallback.
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(function () { return true; }).catch(function () {
+        return fallbackCopy(text);
+      });
+    }
+    return Promise.resolve(fallbackCopy(text));
+  }
+  function fallbackCopy(text) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function asJson(r) {
+    return r.json().catch(function () { return {}; }).then(function (j) {
+      return { ok: r.ok, status: r.status, body: j };
+    });
+  }
+
+  function showServerKey(d) {
+    state.serverKey = d.key || '';
+    $('keyValue').textContent = d.key || '(未设置 —— 任何来源都能直接调用 /v1/chat/completions)';
+    $('keyMeta').textContent = d.configured === false ? '当前没有密钥' : '';
+    $('keyCopy').disabled = !d.key;
+  }
+
+  function loadServerKey() {
+    $('keyValue').textContent = '读取中…';
+    $('keyMeta').textContent = '';
+    $('keyCopy').disabled = true;
+    fetch('/admin/server-key', { headers: authHeaders(), cache: 'no-store' })
+      .then(function (r) {
+        if (r.status === 401) {
+          closeGate();
+          openUnlockGate('密钥不正确，请重试', false);
+          throw new Error('unauthorized');
+        }
+        return asJson(r);
+      })
+      .then(function (o) {
+        if (o.ok) { showServerKey(o.body); return; }
+        var msg = (o.body && o.body.error && o.body.error.message) || ('HTTP ' + o.status);
+        $('keyValue').textContent = '读取失败';
+        setMsg(msg, true);
+      })
+      .catch(function (e) {
+        if (e.message === 'unauthorized') return;
+        $('keyValue').textContent = '读取失败';
+        setMsg(e.message, true);
+      });
+  }
+
+  // 32 random bytes -> 64 hex chars, the same shape as the key we ship.
+  function randomKey() {
+    var bytes = new Uint8Array(32);
+    (window.crypto || window.msCrypto).getRandomValues(bytes);
+    var hex = '';
+    for (var i = 0; i < bytes.length; i++) hex += ('0' + bytes[i].toString(16)).slice(-2);
+    return hex;
+  }
+
+  function render(d) {
+    state.data = d;
+    var s = d.server, t = d.totals;
+    var shownHost = (s.host === '0.0.0.0' || s.host === '::') ? location.hostname || '127.0.0.1' : s.host;
+    $('serverLine').innerHTML = '';
+    $('serverLine').appendChild(document.createTextNode('http://' + shownHost + ':' + s.port + '  ·  uptime ' + fmtUptime(s.uptimeMs) + '  ·  '));
+    var b = document.createElement('b');
+    b.textContent = s.protocol + ' ' + s.hosts.join(' / ');
+    $('serverLine').appendChild(b);
+    var rotInfo = s.rotation || {};
+    $('serverLine').appendChild(document.createTextNode(
+      '  ·  轮转 ' + (rotInfo.mode || '-') +
+      '（已切换 ' + (rotInfo.switches == null ? '—' : rotInfo.switches) + ' 次）'
+    ));
+
+    var rot = s.rotation || {};
+    var cur = rot.current || '无';
+    var cards = [
+      ['账号总数', String(t.total), ''],
+      ['当前账号', cur, cur !== '无' ? 'var(--accent)' : 'var(--dim)', 1],
+      ['可用', String(t.available), ''],
+      ['处理中', String(t.busy), ''],
+      ['冷却中', String(t.cooling), t.cooling ? 'var(--warn)' : ''],
+      ['请求总数', String(s.requests.total), ''],
+      ['失败尝试', String(s.requests.err), s.requests.err ? 'var(--err)' : ''],
+      ['当前并发', String(s.requests.inFlight), '']
+    ];
+    var box = $('cards');
+    box.innerHTML = '';
+    cards.forEach(function (c) {
+      var el = document.createElement('div');
+      el.className = 'card';
+      var k = document.createElement('div'); k.className = 'k'; k.textContent = c[0];
+      var v = document.createElement('div'); v.className = 'v'; v.textContent = c[1];
+      if (c[2]) v.style.color = c[2];
+      if (c[3]) v.style.fontSize = '15px';
+      el.appendChild(k); el.appendChild(v); box.appendChild(el);
+    });
+
+    var tbody = $('rows');
+    tbody.innerHTML = '';
+    d.accounts.forEach(function (a) {
+      var tr = document.createElement('tr');
+
+      var nameTd = document.createElement('td');
+      var nameWrap = document.createElement('span');
+      nameWrap.style.display = 'inline-flex';
+      nameWrap.style.alignItems = 'center';
+      nameWrap.style.gap = '6px';
+      var nm = document.createElement('span'); nm.className = 'name'; nm.textContent = a.name;
+      nameWrap.appendChild(nm);
+      if (a.current) {
+        var tag = document.createElement('span'); tag.className = 'next'; tag.textContent = '当前';
+        nameWrap.appendChild(tag);
+      }
+      nameTd.appendChild(nameWrap);
+      tr.appendChild(nameTd);
+
+      cell(tr, a.authMode + (a.variant ? ' · ' + a.variant : ''), 'mode');
+
+      var uidWrap = document.createElement('span');
+      uidWrap.className = 'uid';
+      uidWrap.textContent = a.userId ? a.userId.slice(0, 8) + '…' : '未知';
+      uidWrap.title = a.userId ? a.userId + '（点击复制）' : '没有 userId';
+      if (a.userId) {
+        uidWrap.addEventListener('click', function () {
+          navigator.clipboard && navigator.clipboard.writeText(a.userId);
+          uidWrap.textContent = '已复制';
+          setTimeout(function () { uidWrap.textContent = a.userId.slice(0, 8) + '…'; }, 1200);
+        });
+      }
+      cell(tr, uidWrap);
+
+      var stTd = document.createElement('td');
+      var cls = a.cooling ? 's-cooling' : (a.state === 'busy' ? 's-busy' : 's-available');
+      var badge = document.createElement('span');
+      badge.className = 'badge ' + cls;
+      var dot = document.createElement('span'); dot.className = 'dot';
+      badge.appendChild(dot);
+      badge.appendChild(document.createTextNode(
+        a.cooling ? '冷却 ' + fmtLeft(a.cooldownRemainingMs) : (a.state === 'busy' ? '处理中' : '可用')
+      ));
+      stTd.appendChild(badge);
+      tr.appendChild(stTd);
+
+      cell(tr, String(a.inFlight), 'num');
+
+      var numTd = document.createElement('td');
+      numTd.className = 'num';
+      numTd.appendChild(document.createTextNode(a.totalRequests + ' / '));
+      var okSpan = document.createElement('span'); okSpan.textContent = a.okRequests; okSpan.style.color = 'var(--ok)';
+      var failSpan = document.createElement('span'); failSpan.className = 'e'; failSpan.textContent = a.failRequests;
+      numTd.appendChild(okSpan);
+      numTd.appendChild(document.createTextNode(' / '));
+      numTd.appendChild(failSpan);
+      tr.appendChild(numTd);
+
+      cell(tr, a.lastUsedAgoMs == null ? '-' : fmtAgo(a.lastUsedAgoMs), 'muted');
+      cell(tr, a.credentialExpiresAt ? fmtLeft(a.credentialExpiresAt - Date.now()) : (a.authMode === 'apikey' ? '不过期' : '-'), 'muted');
+
+      var errTd = document.createElement('td');
+      if (a.lastError) {
+        var e = document.createElement('span');
+        e.className = 'err-line';
+        e.textContent = a.lastError;
+        e.title = a.lastError;
+        errTd.appendChild(e);
+      } else {
+        errTd.innerHTML = '<span class="muted">-</span>';
+      }
+      tr.appendChild(errTd);
+
+      tbody.appendChild(tr);
+    });
+
+    var notice = $('notice');
+    notice.innerHTML = '';
+    if (!s.requireKey) {
+      var n1 = document.createElement('div');
+      n1.className = 'notice';
+      n1.textContent = '还没有设置访问密钥：局域网内任何人都能打开这个页面和 /admin/pool。点右上角「访问密钥」可以立刻生成一个。';
+      notice.appendChild(n1);
+    }
+
+    var expired = state.data.accounts.filter(function (a) {
+      return a.authMode === 'refresh' && a.accessTokenExpiresAt && a.accessTokenExpiresAt < Date.now();
+    }).length;
+    if (expired) {
+      var n2 = document.createElement('div');
+      n2.className = 'notice err';
+      n2.textContent = expired + ' 个账号的内存 access token 已过期，下一次请求会自动重新换取。';
+      notice.appendChild(n2);
+    }
+
+    $('updated').textContent = '更新于 ' + clock(Date.now());
+    $('foot').textContent = '自动刷新 ' + (isAuto() ? '3 秒' : '关闭');
+  }
+
+  function isAuto() { return $('auto').checked; }
+
+  function schedule() {
+    if (state.timer) clearInterval(state.timer);
+    // Never re-render underneath an open dialog: the table swap is harmless but
+    // a fetch that succeeds used to close the overlay (see load()).
+    if (isAuto()) {
+      state.timer = setInterval(function () {
+        if (gateState()) return;
+        load();
+      }, 3000);
+    }
+    $('foot').textContent = '自动刷新 ' + (isAuto() ? '3 秒' : '关闭');
+  }
+
+  function authHeaders() {
+    return state.key ? { Authorization: 'Bearer ' + state.key } : {};
+  }
+
+  function load() {
+    fetch('/admin/pool', { headers: authHeaders(), cache: 'no-store' })
+      .then(function (r) {
+        if (r.status === 401) { openUnlockGate('密钥不正确，请重试', true); throw new Error('unauthorized'); }
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (d) {
+        // Only the 401-driven unlock prompt closes on its own; a dialog the user
+        // opened stays put no matter how many refreshes happen behind it.
+        if (gateState() === 'unlock' && state.gateAuto) closeGate();
+        render(d);
+      })
+      .catch(function (e) {
+        if (e.message === 'unauthorized') return;
+        $('serverLine').textContent = '无法读取状态：' + e.message;
+      });
+  }
+
+  $('refresh').addEventListener('click', load);
+  $('auto').addEventListener('change', schedule);
+  $('changeJwt').addEventListener('click', openKeyDialog);
+  $('setKey').addEventListener('click', function () { openUnlockGate('输入新的 serverApiKey', false); });
+  $('gateCancel').addEventListener('click', closeGate);
+  $('keyClose').addEventListener('click', closeGate);
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && gateState()) closeGate();
+  });
+  $('gateForm').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    state.key = $('keyInput').value.trim();
+    localStorage.setItem(KEY_STORE, state.key);
+    closeGate();
+    load();
+  });
+  $('keyCopy').addEventListener('click', function () {
+    if (!state.serverKey) return;
+    copyText(state.serverKey).then(function (ok) {
+      setMsg(ok ? '已复制当前密钥（' + state.serverKey.length + ' 字符）' : '浏览器不允许写剪贴板，请手动选中复制', !ok);
+    });
+  });
+  $('keyRand').addEventListener('click', function () {
+    $('keyNew').value = randomKey();
+    $('keyNew').focus();
+    $('keyNew').select();
+    setMsg('已生成一个随机密钥，确认后点「保存并生效」', false);
+  });
+  $('keyForm').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var next = $('keyNew').value.trim();
+    if (!next) { setMsg('先填一个新密钥，或点「随机」生成一个', true); return; }
+    var btn = $('keySave');
+    btn.disabled = true;
+    btn.textContent = '保存中…';
+    setMsg('正在写入配置并生效…', false);
+    fetch('/admin/server-key', {
+      method: 'POST',
+      headers: Object.assign({ 'content-type': 'application/json' }, authHeaders()),
+      body: JSON.stringify({ key: next })
+    })
+      .then(asJson)
+      .then(function (o) {
+        if (!o.ok) {
+          var msg = (o.body && o.body.error && o.body.error.message) || ('HTTP ' + o.status);
+          setMsg('保存失败：' + msg, true);
+          return;
+        }
+        // This browser must switch to the new key, otherwise its own next poll
+        // is rejected the moment it is no longer coming from loopback.
+        state.key = o.body.key;
+        localStorage.setItem(KEY_STORE, o.body.key);
+        showServerKey(o.body);
+        $('keyNew').value = '';
+        setMsg(
+          '已生效。\n客户端请改用 Authorization: Bearer ' + o.body.key,
+          false
+        );
+        load();
+      })
+      .catch(function (e) { setMsg('保存失败：' + e.message, true); })
+      .then(function () {
+        btn.textContent = '保存并生效';
+        btn.disabled = false;
+      });
+  });
+
+  load();
+  schedule();
+})();
+</script>
+</body>
+</html>

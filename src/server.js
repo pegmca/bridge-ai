@@ -2,16 +2,27 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   selectAccount,
+  selectByRotation,
+  createRotation,
+  advanceRotation,
   markUsed,
   markExhausted,
   markAuthError,
   clearError,
+  beginCall,
+  endCall,
 } from './accounts.js';
 import { resolveToken, refreshToken } from './auth-codebuddy.js';
 import { forwardRequest, UpstreamHttpError, UpstreamStreamError } from './proxy.js';
 import { classifyStatus } from './quota.js';
+import { buildStatus } from './status.js';
+import { redact } from './util.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const DASHBOARD_FILE = path.join(HERE, 'dashboard.html');
 
 const HOP_BY_HOP = new Set([
   'host',
@@ -50,7 +61,7 @@ function filterOutHeaders(h) {
   return out;
 }
 
-export function createServer({ config, pool }) {
+export function createServer({ config, pool, configPath = null }) {
   const provider = config.provider || {};
   const hosts = provider.hosts && provider.hosts.length
     ? provider.hosts
@@ -78,12 +89,48 @@ export function createServer({ config, pool }) {
           'X-Private-Data': 'false',
         };
   // Per-request trace/request-id family the CLI attaches (fresh each call).
-  function cliTraceHeaders() {
+  //
+  // The conversation id is different: the upstream uses it as the scope of
+  // prompt caching, so a fresh UUID per call makes every request look like a
+  // brand-new conversation and the cache is never reused (measured: hit=0,
+  // full price). Modes:
+  //   "prefix" (default) — derive it from the first message, so every turn of
+  //                        one conversation reuses the same id and multi-turn
+  //                        requests keep hitting the cached prefix; different
+  //                        systems / openings get different ids.
+  //   "stable"           — one id for the whole process.
+  //   "random"           — old behaviour, no cache reuse.
+  const sessionMode = ['prefix', 'stable', 'random'].includes(provider.sessionMode)
+    ? provider.sessionMode
+    : 'prefix';
+  const stableConvId = crypto.randomUUID();
+
+  function conversationIdFor(bodyText, alreadyParsed) {
+    if (sessionMode === 'random') return crypto.randomUUID();
+    if (sessionMode === 'stable') return stableConvId;
+    // The cache is anchored on the prompt prefix, so the first message is the
+    // right identity for a conversation: turn 2..n keep it unchanged.
+    let first = null;
+    const parsedBody = alreadyParsed || (() => {
+      try {
+        return JSON.parse(bodyText);
+      } catch {
+        return null;
+      }
+    })();
+    if (parsedBody && Array.isArray(parsedBody.messages)) first = parsedBody.messages[0];
+    if (!first) return stableConvId;
+    const content = typeof first.content === 'string' ? first.content : JSON.stringify(first.content ?? '');
+    const h = crypto.createHash('sha256').update(`${first.role}:${content}`).digest('hex').slice(0, 32);
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+  }
+
+  function cliTraceHeaders(convId) {
     const rid = crypto.randomUUID().replace(/-/g, '');
     const span = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
     const parent = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
     const traceId = crypto.randomUUID().replace(/-/g, '');
-    const convId = crypto.randomUUID();
+    convId = convId || crypto.randomUUID();
     return {
       'X-Request-ID': rid,
       'X-Root-Request-ID': rid,
@@ -102,6 +149,18 @@ export function createServer({ config, pool }) {
   }
   const timeout = provider.timeout || 120000;
   const cooldownMs = (config.rotation && config.rotation.cooldownMs) || 3600000;
+  // Short cooldown for transient / credential problems (5xx, network, 401/403):
+  // long enough not to bounce straight back, short enough to recover quickly.
+  const errorCooldownMs = Math.min(cooldownMs, (config.rotation && config.rotation.errorCooldownMs) || 60000);
+  // Which account serves traffic, and when the pointer moves to the next one.
+  const rotation = createRotation(config);
+
+  // Sticky: one current account for the whole process. LRU: re-pick per request.
+  function pickAccount(attempted) {
+    return rotation.mode === 'lru'
+      ? selectAccount(pool, attempted)
+      : selectByRotation(pool, rotation, attempted);
+  }
   // Optional: log the exact body sent upstream (off by default; may contain conversation content).
   const logOutgoingBody = !!(config.logOutgoingBody);
   // Upstream "channel verification" (11128) is probabilistic per request and its
@@ -129,16 +188,135 @@ export function createServer({ config, pool }) {
 
   const ctx = { hosts, identity };
   // Optional gate for incoming requests (useful when bound to 0.0.0.0).
-  const serverKey = (config.listen && config.listen.serverApiKey) || config.serverApiKey || null;
+  // Mutable: the dashboard can rotate it at runtime (see handleServerKey), and a
+  // restart must not be needed for the new value to take effect.
+  const keyField = config.listen ? 'listen.serverApiKey' : 'serverApiKey';
+  let serverKey = (config.listen && config.listen.serverApiKey) || config.serverApiKey || null;
+
+  // Runtime counters surfaced by /admin/pool. `startedAt` is when this server
+  // instance came up, not when the process started.
+  const startedAt = Date.now();
+  const stats = { total: 0, ok: 0, err: 0, inFlight: 0 };
+
+  function queryParam(url, name) {
+    try {
+      return new URL(url, 'http://placeholder').searchParams.get(name);
+    } catch {
+      return null;
+    }
+  }
 
   function serverAuthOk(req) {
     if (!serverKey) return true;
     const auth = req.headers['authorization'];
     const xkey = req.headers['x-api-key'];
-    return (auth && auth === `Bearer ${serverKey}`) || xkey === serverKey;
+    if (auth && auth === `Bearer ${serverKey}`) return true;
+    if (xkey === serverKey) return true;
+    // Convenience for curl / a bookmarked dashboard URL; never used by the page.
+    return queryParam(req.url, 'key') === serverKey;
+  }
+
+  // Requests arriving over loopback are exempt from the key on *read-only*
+  // endpoints (the pool view). Rationale: a browser cannot attach an
+  // Authorization header to a plain page load, and whoever can reach the bridge
+  // over loopback can already read config.json — the key adds nothing there.
+  // Chat traffic (/v1/chat/completions) is never exempt, and neither is anything
+  // coming in over the network.
+  function isLoopback(req) {
+    const addr = (req.socket && req.socket.remoteAddress) || '';
+    return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+  }
+
+  function sendJson(res, code, obj) {
+    const body = JSON.stringify(obj, null, 2);
+    res.writeHead(code, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    });
+    res.end(body);
+  }
+
+  function sendDashboard(res) {
+    fs.readFile(DASHBOARD_FILE, 'utf8', (err, html) => {
+      if (err) {
+        res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end(`dashboard.html missing: ${err.message}`);
+        return;
+      }
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+      });
+      res.end(html);
+    });
+  }
+
+  // --- this bridge's own access key ----------------------------------------
+  //
+  // Not an account token: this is the secret clients must send as
+  // `Authorization: Bearer <key>` when they call /v1/chat/completions.
+  //
+  // GET  /admin/server-key                -> current key (plaintext, for copying)
+  // POST /admin/server-key {"key":"…"}    -> write it into config.json and swap
+  //      the value the running process checks.
+  //
+  // The file is written *first*: if it cannot be written the live key stays as
+  // it was, so config.json and the process never disagree about what the key is.
+  async function handleServerKey(req, res) {
+    if (req.method === 'GET') {
+      return sendJson(res, 200, {
+        key: serverKey,
+        configured: !!serverKey,
+        field: keyField,
+        configPath: configPath || null,
+        header: 'Authorization: Bearer <key>',
+      });
+    }
+    let body = null;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      body = null;
+    }
+    if (!body || typeof body !== 'object') {
+      return sendJson(res, 400, { error: { message: 'invalid JSON body' } });
+    }
+    const next = String(body.key || '').trim();
+    if (!/^[A-Za-z0-9._~+/-]{16,256}$/.test(next)) {
+      return sendJson(res, 400, {
+        error: { message: 'key must be 16-256 chars of A-Z a-z 0-9 . _ ~ + / -' },
+      });
+    }
+    if (!configPath) {
+      return sendJson(res, 500, { error: { message: 'config path unknown; edit config.json by hand' } });
+    }
+    try {
+      const raw = fs.readFileSync(configPath, 'utf8');
+      const cfg = JSON.parse(raw);
+      if (cfg.listen && typeof cfg.listen === 'object') cfg.listen.serverApiKey = next;
+      else cfg.serverApiKey = next;
+      fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2) + (raw.endsWith('\n') ? '\n' : ''));
+    } catch (e) {
+      return sendJson(res, 500, { error: { message: `could not write ${configPath}: ${e.message}` } });
+    }
+    serverKey = next;
+    if (config.listen) config.listen.serverApiKey = next;
+    else config.serverApiKey = next;
+    console.log(`[bridge] server api key updated (${redact(next)}) -> ${configPath}`);
+    return sendJson(res, 200, {
+      ok: true,
+      key: next,
+      field: keyField,
+      configPath,
+    });
   }
 
   async function handleChat(req, res) {
+    stats.total += 1;
+    stats.inFlight += 1;
+    res.on('close', () => {
+      stats.inFlight = Math.max(0, stats.inFlight - 1);
+    });
     let bodyStr = await readBody(req);
     let parsed;
     try {
@@ -201,80 +379,163 @@ export function createServer({ config, pool }) {
     }
 
     const attempt = async (attempted) => {
-      const account = selectAccount(pool, attempted);
-      if (!account) throw new UpstreamHttpError(503, 'no available account');
+      const account = pickAccount(attempted);
+      if (!account) {
+        const cooling = pool.filter((a) => Date.now() < a.exhaustedUntil).length;
+        throw new UpstreamHttpError(
+          503,
+          pool.length === 0
+            ? 'no account configured'
+            : `all accounts unavailable (${attempted.size}/${pool.length} tried, ${cooling} cooling)`
+        );
+      }
       attempted.add(account);
       markUsed(account);
-      const token = await resolveToken(account, ctx);
-      const uid = (account.auth && account.auth.userId) || ctx.userId;
-      let lastErr;
-      // Round 0 is the normal try; later rounds replay the same payload with new
-      // trace headers to get past an intermittent 11128 channel-verification block.
-      for (let round = 0; round <= verifyRetries; round++) {
-        if (round > 0) {
-          console.log(`[fwd] 11128 retry ${round}/${verifyRetries} [${rid}] account=${account.name}`);
-          await sleep(200 + Math.floor(Math.random() * 300) * round);
+
+      // One "call" per (client request, account). Opened before the token is
+      // resolved so a dead credential shows up on the dashboard instead of
+      // looking like zero traffic; closed exactly once via settle().
+      beginCall(account);
+      let settled = false;
+      const settle = (opts) => {
+        if (settled) return;
+        settled = true;
+        endCall(account, opts);
+        if (opts.ok) stats.ok += 1;
+        else stats.err += 1;
+      };
+
+      let tokenReady = false;
+      try {
+        const token = await resolveToken(account, ctx);
+        tokenReady = true;
+        const uid = (account.auth && account.auth.userId) || ctx.userId;
+        // The international gateway requires messages[0] to be a system prompt;
+        // prepend a neutral one per account so CN accounts keep the client body
+        // exactly as sent.
+        let sendBody = bodyStr;
+        if (account.needsSystemPrompt) {
+          const msgs = Array.isArray(parsed.messages) ? parsed.messages : [];
+          if (!msgs.length || msgs[0].role !== 'system') {
+            const sys =
+              (provider.defaultSystemPrompt && String(provider.defaultSystemPrompt)) ||
+              'You are a helpful AI assistant.';
+            sendBody = JSON.stringify({ ...parsed, messages: [{ role: 'system', content: sys }, ...msgs] });
+          }
         }
-        let blocked = false;
-        for (const host of hosts) {
-          const headers = {
-            ...incoming,
-            ...identity,
-            // The official CLI sends the account's user id on chat calls too;
-            // omitting it is one of the signals its channel check looks at.
-            ...(uid ? { 'X-User-Id': uid } : {}),
-            ...cliIdentity,
-            ...cliTraceHeaders(),
-            'x-codebuddy-request': '1',
-            [authHeader]: `${authScheme} ${token}`,
-            host,
-          };
-          try {
-            const r = await forwardRequest({
-              baseUrl: `https://${host}`,
-              path: upstreamPath,
-              method: 'POST',
-              headers,
-              bodyStr,
-              stream,
-              timeout,
-            });
-            clearError(account);
-            console.log(`[fwd] OK  [${rid}] account=${account.name} host=${host} status=${r.status} ${Date.now() - t0}ms`);
-            return r;
-          } catch (e) {
-            lastErr = e;
-            if (isChannelVerify(e)) {
-              blocked = true;
-              continue; // retryable at request level, not host/account level
-            }
-            if (e instanceof UpstreamHttpError) {
-              const cls = classifyStatus(e.status);
-              if (cls === 'auth') {
-                refreshToken(account); // drop cached token; next resolve re-reads
-                markAuthError(account, `status ${e.status}`);
-                break; // auth error is account-level, don't retry other hosts
+        let lastErr;
+        // Set when the failure is the account's fault — only then does the
+        // rotation pointer move on to the next account.
+        let rotate = false;
+        // An account may pin its own upstream hosts (international accounts do).
+        const acctHosts = account.chatHosts || hosts;
+        // Derived from the prompt prefix so the upstream cache can be reused.
+        const convId = conversationIdFor(sendBody, sendBody === bodyStr ? parsed : null);
+        // Round 0 is the normal try; later rounds replay the same payload with new
+        // trace headers to get past an intermittent 11128 channel-verification block.
+        for (let round = 0; round <= verifyRetries; round++) {
+          if (round > 0) {
+            console.log(`[fwd] 11128 retry ${round}/${verifyRetries} [${rid}] account=${account.name}`);
+            await sleep(200 + Math.floor(Math.random() * 300) * round);
+          }
+          let blocked = false;
+          for (const host of acctHosts) {
+            const headers = {
+              ...incoming,
+              ...identity,
+              // The official CLI sends the account's user id on chat calls too;
+              // omitting it is one of the signals its channel check looks at.
+              ...(uid ? { 'X-User-Id': uid } : {}),
+              ...cliIdentity,
+              ...cliTraceHeaders(convId),
+              'x-codebuddy-request': '1',
+              [authHeader]: `${authScheme} ${token}`,
+              host,
+            };
+            try {
+              const r = await forwardRequest({
+                baseUrl: `https://${host}`,
+                path: upstreamPath,
+                method: 'POST',
+                headers,
+                bodyStr: sendBody,
+                stream,
+                timeout,
+              });
+              settle({ status: r.status, ok: true });
+              clearError(account);
+              console.log(`[fwd] OK  [${rid}] account=${account.name} host=${host} status=${r.status} ${Date.now() - t0}ms`);
+              return r;
+            } catch (e) {
+              lastErr = e;
+              if (isChannelVerify(e)) {
+                blocked = true;
+                continue; // retryable at request level, not host/account level
               }
-              // host-level failure -> try next host
+              if (e instanceof UpstreamHttpError) {
+                const cls = classifyStatus(e.status);
+                if (cls === 'auth') {
+                  refreshToken(account); // drop cached token; next resolve re-reads
+                  break; // auth error is account-level, don't retry other hosts
+                }
+                // host-level failure -> try next host
+              }
+              // fall through to next host
             }
-            // fall through to next host
+          }
+          if (!blocked) break;
+        }
+        if (lastErr) {
+          if (lastErr instanceof UpstreamHttpError) {
+            // 11128 is a per-request gate failure: do not penalise the account.
+            if (!isChannelVerify(lastErr)) {
+              const cls = classifyStatus(lastErr.status);
+              if (cls === 'quota') {
+                // 429: this account's quota is gone. Step aside for a long time.
+                markExhausted(account, cooldownMs, 'quota');
+                rotate = true;
+              } else if (cls === 'auth') {
+                // 401/403: credential is dead. Re-read it next time, and give the
+                // pointer a reason not to come straight back here.
+                refreshToken(account);
+                markAuthError(account, `status ${lastErr.status}`, errorCooldownMs);
+                rotate = true;
+              } else if (cls === 'retryable') {
+                // 5xx: overloaded upstream. Brief cooldown, then step aside.
+                markExhausted(account, errorCooldownMs, `http ${lastErr.status}`);
+                rotate = true;
+              }
+              // Anything else (400/404/422…): the *request* is wrong, not the
+              // account. Pass it back to the client instead of cooling the pool.
+            }
+          } else if (lastErr instanceof UpstreamStreamError) {
+            markExhausted(account, errorCooldownMs, 'stream_error');
+            rotate = true;
+          } else {
+            // DNS / TCP reset / timeout: account-level enough to try elsewhere.
+            markExhausted(account, errorCooldownMs, `network: ${String(lastErr.message || lastErr).slice(0, 60)}`);
+            rotate = true;
           }
         }
-        if (!blocked) break;
-      }
-      if (lastErr) {
-        if (lastErr instanceof UpstreamHttpError) {
-          // 11128 is a per-request gate failure: do not penalise the account.
-          if (!isChannelVerify(lastErr)) {
-            const cls = classifyStatus(lastErr.status);
-            if (cls === 'quota') markExhausted(account, cooldownMs);
-            else markExhausted(account, Math.min(cooldownMs, 60000));
-          }
-        } else if (lastErr instanceof UpstreamStreamError) {
-          markExhausted(account, cooldownMs);
-        }
-        if (!isChannelVerify(lastErr) && attempted.size < pool.length) return attempt(attempted);
+        settle({
+          status: lastErr instanceof UpstreamHttpError ? lastErr.status : null,
+          ok: false,
+        });
+        if (!lastErr) throw new Error('upstream attempt produced no result');
+        if (rotate) advanceRotation(pool, rotation, account);
+        if (rotate && attempted.size < pool.length) return attempt(attempted);
         throw lastErr;
+      } catch (e) {
+        settle({ status: e instanceof UpstreamHttpError ? e.status : null, ok: false });
+        // A dead credential is account-level, not request-level: rotate to the
+        // next account when there is one instead of failing the client call.
+        if (!tokenReady) {
+          // Dead credential: account-level. Cool it, step aside, retry elsewhere.
+          markAuthError(account, `token: ${String(e.message || e).slice(0, 80)}`, errorCooldownMs);
+          advanceRotation(pool, rotation, account);
+          if (attempted.size < pool.length) return attempt(attempted);
+        }
+        throw e;
       }
     };
 
@@ -314,6 +575,42 @@ export function createServer({ config, pool }) {
     if (req.url === '/healthz') {
       res.writeHead(200, { 'content-type': 'text/plain' });
       res.end('ok');
+      return;
+    }
+    let pathname = req.url;
+    try {
+      pathname = new URL(req.url, 'http://placeholder').pathname;
+    } catch {}
+    // The dashboard shell carries no data and is loaded by a plain browser
+    // navigation (which cannot send an Authorization header), so it is served
+    // before the key check. It then fetches /admin/pool with the key from
+    // localStorage — that endpoint stays protected.
+    if (req.method === 'GET' && (pathname === '/' || pathname === '/admin' || pathname === '/admin/')) {
+      sendDashboard(res);
+      return;
+    }
+    // Read-only pool view: free over loopback, key-gated from the network.
+    if (req.method === 'GET' && pathname === '/admin/pool') {
+      if (!isLoopback(req) && !serverAuthOk(req)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'unauthorized: missing or invalid server api key' } }));
+        return;
+      }
+      sendJson(res, 200, buildStatus({ config, pool, startedAt, stats, rotation }));
+      return;
+    }
+    // The bridge's own access key (Authorization: Bearer <key>). Same gate as
+    // the pool view: free over loopback, the current key is required from the
+    // network — otherwise anyone on the LAN could rotate it and lock you out.
+    if ((req.method === 'GET' || req.method === 'POST') && pathname === '/admin/server-key') {
+      if (!isLoopback(req) && !serverAuthOk(req)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'unauthorized: missing or invalid server api key' } }));
+        return;
+      }
+      handleServerKey(req, res).catch((e) => {
+        if (!res.headersSent) sendJson(res, 500, { error: { message: String((e && e.message) || e) } });
+      });
       return;
     }
     if (!serverAuthOk(req)) {

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { expandHome } from './util.js';
+import { expandHome, redact, decodeJwt } from './util.js';
+import { resolveStoreToken, storeFile, findEntry, invalidateStoreToken } from './store-wbs.js';
 
 // Resolve the bearer token for a CodeBuddy account.
 //   mode "apikey"  -> static API key from config (no refresh needed)
@@ -41,6 +42,12 @@ export async function resolveToken(account, ctx = {}) {
   if (auth.mode === 'refresh') {
     return await resolveRefresh(account, auth, ctx);
   }
+  if (auth.mode === 'wbs') {
+    // Credentials owned by workbuddy-switch: read/mint from its store and write
+    // the rotated pair back there, so both tools converge on one token chain.
+    const { token } = await resolveStoreToken({ store: auth.store, uid: auth.uid });
+    return token;
+  }
   if (auth.mode === 'import') {
     const cached = importCache.get(account.name);
     if (cached && Date.now() - cached.ts < IMPORT_TTL_MS) return cached.token;
@@ -63,7 +70,99 @@ export async function resolveToken(account, ctx = {}) {
 // Called after a 401 so a fresh CodeBuddy login is picked up.
 export function refreshToken(account) {
   if (account.auth?.mode === 'refresh') refreshCache.delete(account.name);
+  else if (account.auth?.mode === 'wbs') invalidateStoreToken({ store: account.auth.store, uid: account.auth.uid });
   else importCache.delete(account.name);
+}
+// --- introspection (status dashboard) ---------------------------------------
+// Describe *who* an account is and when its credentials expire. Purely local:
+// no network call, no token rotation, and the secret itself is only ever
+// returned masked.
+export function describeAuth(account) {
+  const auth = account.auth || {};
+  const mode = auth.mode || (auth.token ? 'token' : 'unknown');
+
+  if (mode === 'apikey') {
+    return {
+      authMode: 'apikey',
+      userId: auth.userId || null,
+      identitySource: auth.userId ? 'config' : 'unknown',
+      secretPreview: redact(auth.apiKey),
+      credentialExpiresAt: null,
+      accessTokenExpiresAt: null,
+      sessionStartedAt: null,
+      sessionId: null,
+    };
+  }
+
+  if (mode === 'refresh') {
+    const payload = decodeJwt(auth.refreshToken);
+    const cached = refreshCache.get(account.name);
+    const uid = auth.userId || (payload && payload.sub) || null;
+    return {
+      authMode: 'refresh',
+      userId: uid,
+      identitySource: auth.userId ? 'config' : payload?.sub ? 'jwt' : 'unknown',
+      secretPreview: redact(auth.refreshToken),
+      // The offline refresh token is the long-lived credential.
+      credentialExpiresAt: payload?.exp ? payload.exp * 1000 : null,
+      // The minted access token currently held in memory (null = not minted yet).
+      accessTokenExpiresAt: cached ? cached.exp : null,
+      sessionStartedAt: payload?.iat ? payload.iat * 1000 : null,
+      sessionId: payload?.sid ? String(payload.sid).slice(0, 8) : null,
+    };
+  }
+
+  if (mode === 'wbs') {
+    const file = storeFile(auth.store);
+    let entry = null;
+    try {
+      const found = findEntry(file, auth.uid);
+      entry = found && found.entry;
+    } catch {
+      entry = null;
+    }
+    return {
+      authMode: 'wb-switch',
+      userId: auth.uid || (entry && entry.uid) || null,
+      identitySource: 'store',
+      secretPreview: entry && entry.accessToken ? redact(entry.accessToken) : null,
+      // The refresh token is the durable credential; the access token is the
+      // short-lived one we actually send upstream.
+      credentialExpiresAt: entry ? entry.refreshExpiresAt : null,
+      accessTokenExpiresAt: entry ? entry.expiresAt : null,
+      sessionStartedAt: null,
+      sessionId: null,
+      variant: entry ? entry.variant : null,
+      store: file,
+      accountName: entry ? entry.name : null,
+    };
+  }
+
+  if (mode === 'import') {
+    const cached = importCache.get(account.name);
+    return {
+      authMode: 'import',
+      userId: auth.userId || null,
+      identitySource: auth.userId ? 'config' : 'unknown',
+      secretPreview: cached ? redact(cached.token) : null,
+      credentialExpiresAt: null,
+      accessTokenExpiresAt: cached ? cached.ts + IMPORT_TTL_MS : null,
+      sessionStartedAt: null,
+      sessionId: null,
+      source: expandHome(auth.source || '~/.codebuddy'),
+    };
+  }
+
+  return {
+    authMode: mode,
+    userId: auth.userId || null,
+    identitySource: auth.userId ? 'config' : 'unknown',
+    secretPreview: redact(auth.token),
+    credentialExpiresAt: null,
+    accessTokenExpiresAt: null,
+    sessionStartedAt: null,
+    sessionId: null,
+  };
 }
 
 // Optional self-heal hook: when the upstream rejects our (rotated) refresh token

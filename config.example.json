@@ -28,19 +28,18 @@
     "authScheme": "Bearer",
     "identity": { "X-Product": "SaaS", "X-Domain": "www.codebuddy.cn" },
     "channelVerifyRetries": 3,
+    "sessionMode": "prefix",
     "timeout": 120000
   },
   "rotation": {
-    "cooldownMs": 3600000
+    "mode": "sticky",
+    "cooldownMs": 3600000,
+    "errorCooldownMs": 60000
   },
-  "accounts": [
-    {
-      "name": "cb-1",
-      "auth": {
-        "mode": "refresh",
-        "refreshToken": "REPLACE_WITH_OFFLINE_REFRESH_TOKEN",
-        "userId": "REPLACE_WITH_USER_ID"
-      }
-    }
-  ]
+  "accountSource": {
+    "type": "wb-switch",
+    "path": "~/.wb-switch/accounts.json",
+    "variants": ["cn"]
+  },
+  "accounts": []
 }

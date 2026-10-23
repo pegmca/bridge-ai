@@ -12,6 +12,7 @@
   },
   "scripts": {
     "start": "node scripts/svc.mjs start",
+    "preview": "node scripts/preview.mjs",
     "login": "node src/index.js login",
     "status": "node scripts/svc.mjs status",
     "stop": "node scripts/svc.mjs stop",
