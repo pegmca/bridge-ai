@@ -71,6 +71,19 @@ bridge (src/server.js · 原生 node:http，默认监听 127.0.0.1:8787，可绑
 - 会话 ID 由 `provider.sessionMode` 决定（默认 `prefix`：取 `messages[0]` 摘要），**换号不影响会话 ID**，prompt cache 仍能命中。
 - 每次尝试都先 `beginCall` 再取 token，所以凭证损坏的账号也会出现在看板计数里；`/admin/pool` 与 `npm run status` 读同一份内存态。
 - `logOutgoingBody`（默认关）可临时打印实际发给上游的 body（截断 8KB）用于核对，用完请改回，避免落盘对话内容。
+- 手动指定：`POST /admin/current {"index": n}`（看板每行的「设为当前」）直接写 `rotation.index`，`switchedAt` 更新但 `switches` 不 +1（那是自动切换的计数）。顺带清掉该账号的 `exhaustedUntil` 与 `consecutiveFails`，否则 `selectByRotation` 会跳过它、指针停在没人用的地方。锁定语义只到「下一次账号级失败」为止，之后照常环形轮转。`lru` 模式下没有指针，直接 `409`。
+
+### 账号池热重载（src/pool-reload.js）
+
+账号库 `~/.wb-switch/accounts.json` 由 workbuddy-switch 拥有，桥只是读者，所以它会变。
+
+- 启动时按 `accountSource` 展开一次；`server` 子命令随后监听**目录**（不是文件本身——写入方用原子 rename，监听 inode 会失效），文件名过滤 + 250 ms 去抖。
+- 变更后重新 `mergeAccounts` → `syncPool`：**原地** `splice` 同一个数组，所有闭包（HTTP server、轮转状态、计数）都还指向它；按 `uid`（无 uid 用 name）把 `totalRequests` / `okRequests` / `lastError` / `exhaustedUntil` 等运行时字段搬到新对象上。
+- `rotation.index` 按 `accountKey` 重新定位，所以「当前账号」不因插队/重排而漂移；当前账号被删则回落到 0。
+- 只解析失败（写入方写到一半、JSON 坏）时**保留旧池**并打 warn，不会把账号清空。
+- 自身刷新 token 会写回账号库，同样触发一次重读；这种没有增减的变更不打印日志，避免每次续期都刷屏。
+- `POST /admin/reload` 是逃生口（监听不可用、库在网络盘），鉴权同 `/admin/pool`：loopback 免 key，局域网需当前 access key。
+- 静态 `accounts[]` 条目在重读时原样保留；`mode: "refresh"` 账号会沿用旧 `auth` 对象，避免丢掉内存里已轮换的 refresh token。
 
 ## 部署（src/index.js + 腾讯云）
 

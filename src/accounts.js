@@ -31,6 +31,58 @@ export function createPool(config) {
   }));
 }
 
+// --- live reload ----------------------------------------------------------
+//
+// The pool array is created once and shared with the HTTP server, so a refresh
+// mutates it *in place* instead of replacing it: every existing closure keeps
+// pointing at the same array. Runtime state (counters, cooldown) is carried over
+// for accounts that survive the reload, keyed by account identity — the uid for
+// store-backed accounts, the name otherwise.
+const RUNTIME_FIELDS = [
+  'lastUsedAt',
+  'exhaustedUntil',
+  'lastError',
+  'consecutiveFails',
+  'inFlight',
+  'totalRequests',
+  'okRequests',
+  'failRequests',
+  'lastStatus',
+  'lastOkAt',
+  'lastFailAt',
+];
+
+export function accountKey(a) {
+  if (a.origin && a.origin.uid) return `uid:${a.origin.uid}`;
+  if (a.auth && a.auth.uid) return `uid:${a.auth.uid}`;
+  return `name:${a.name}`;
+}
+
+// Rebuild `pool` from a fresh account list. Returns what changed so the caller
+// can log it. `rotation` (optional) is remapped to the same current account.
+export function syncPool(pool, accountConfigs, rotation = null) {
+  const prev = new Map(pool.map((a) => [accountKey(a), a]));
+  const currentKey = rotation && pool[rotation.index] ? accountKey(pool[rotation.index]) : null;
+  const next = createPool({ accounts: accountConfigs }).map((fresh) => {
+    const old = prev.get(accountKey(fresh));
+    if (!old) return fresh;
+    for (const f of RUNTIME_FIELDS) fresh[f] = old[f];
+    // A mode:"refresh" account keeps its rotated token in memory plus the hook
+    // that persists it; a rebuild must not fall back to the stale config value.
+    if (old.auth && old.auth.mode === 'refresh' && fresh.auth.mode === 'refresh') fresh.auth = old.auth;
+    return fresh;
+  });
+  const nextKeys = new Set(next.map(accountKey));
+  const added = next.filter((a) => !prev.has(accountKey(a))).map((a) => a.name);
+  const removed = pool.filter((a) => !nextKeys.has(accountKey(a))).map((a) => a.name);
+  pool.splice(0, pool.length, ...next);
+  if (rotation) {
+    const i = currentKey ? pool.findIndex((a) => accountKey(a) === currentKey) : -1;
+    rotation.index = i >= 0 ? i : 0;
+  }
+  return { added, removed, total: pool.length };
+}
+
 // Best account to try next: skip already-attempted ones, prefer available
 // (not cooling) and least-recently-used. Falls back to any remaining candidate.
 export function selectAccount(pool, attempted = new Set(), now = Date.now()) {

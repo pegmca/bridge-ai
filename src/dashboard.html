@@ -88,6 +88,20 @@
   .notice.err { border-color: #4d2222; background: #241314; color: #f0a0a0; }
   .hidden { display: none !important; }
 
+  button.pin { padding: 3px 9px; font-size: 11.5px; border-radius: 6px; color: var(--muted); }
+  button.pin:hover:not(:disabled) { color: #cfe0ff; border-color: #2f4f86; }
+  button.pin:disabled { opacity: .45; cursor: default; }
+  .using { font-size: 11.5px; color: #a8c6ff; }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 12px);
+    background: #1b2331; border: 1px solid #2f4f86; color: #cfe0ff;
+    padding: 9px 16px; border-radius: 9px; font-size: 12.5px;
+    opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s; max-width: 80vw;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.err { border-color: #4d2222; background: #241314; color: #f0a0a0; }
+
   .gate { position: fixed; inset: 0; background: rgba(9,11,15,.86); display: flex;
           align-items: center; justify-content: center; padding: 20px; backdrop-filter: blur(3px); }
   .gate form { width: 360px; background: var(--panel); border: 1px solid var(--line);
@@ -153,7 +167,7 @@
         <thead>
           <tr>
             <th>名称</th><th>模式</th><th>身份 user id</th><th>状态</th>
-            <th>并发</th><th>请求 / 成功 / 失败</th><th>最近使用</th><th>凭证到期</th><th>最近错误</th>
+            <th>并发</th><th>请求 / 成功 / 失败</th><th>最近使用</th><th>凭证到期</th><th>最近错误</th><th>操作</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
@@ -162,6 +176,8 @@
   </div>
 
   <div id="notice"></div>
+
+  <div class="toast" id="toast"></div>
 
   <footer>
     <span class="left">
@@ -210,7 +226,7 @@
 <script>
 (function () {
   var KEY_STORE = 'bridge.adminKey';
-  var state = { key: localStorage.getItem(KEY_STORE) || '', timer: null, data: null, gate: null, gateAuto: false, serverKey: '' };
+  var state = { key: localStorage.getItem(KEY_STORE) || '', timer: null, data: null, gate: null, gateAuto: false, serverKey: '', pinning: false };
 
   // Allow ?key= for a one-off deep link, then keep it out of the address bar.
   (function () {
@@ -431,7 +447,7 @@
       var er = document.createElement('tr');
       er.className = 'empty';
       var etd = document.createElement('td');
-      etd.colSpan = 9;
+      etd.colSpan = 10;
       etd.className = 'empty-row';
       var l1 = document.createElement('div');
       l1.textContent = '还没有账号，所以现在转发请求会返回 503。';
@@ -514,6 +530,30 @@
       }
       tr.appendChild(errTd);
 
+      // Manual pick: sticky mode keeps a pointer between requests, so the
+      // dashboard can move it. In lru mode there is no pointer to move.
+      var actTd = document.createElement('td');
+      if (a.current) {
+        var usingEl = document.createElement('span');
+        usingEl.className = 'using';
+        usingEl.textContent = '正在使用';
+        actTd.appendChild(usingEl);
+      } else {
+        var pinBtn = document.createElement('button');
+        pinBtn.type = 'button';
+        pinBtn.className = 'pin';
+        pinBtn.textContent = '设为当前';
+        if (rot.mode === 'sticky') {
+          pinBtn.title = '把轮转指针固定到「' + a.name + '」，直到它出现账号级错误';
+          pinBtn.addEventListener('click', function () { pinAccount(a, pinBtn); });
+        } else {
+          pinBtn.disabled = true;
+          pinBtn.title = 'rotation.mode 是 lru：每个请求都重新挑号，手动指定不会生效';
+        }
+        actTd.appendChild(pinBtn);
+      }
+      tr.appendChild(actTd);
+
       tbody.appendChild(tr);
     });
 
@@ -582,8 +622,58 @@
       });
   }
 
-  $('refresh').addEventListener('click', load);
-  $('auto').addEventListener('change', schedule);
+  // Transient confirmation strip. The 3s refresh cannot show feedback for a
+  // click, and a re-render would eat any inline state.
+  var toastTimer = null;
+  function toast(text, isErr) {
+    var el = $('toast');
+    el.textContent = text;
+    el.className = 'toast show' + (isErr ? ' err' : '');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.className = 'toast' + (isErr ? ' err' : ''); }, 2800);
+  }
+
+  // Move the sticky pointer by hand (POST /admin/current). The account's cooldown
+  // is lifted server-side, otherwise the pointer would sit somewhere every
+  // request skips — so ask first when that is about to happen.
+  function pinAccount(a, btn) {
+    if (state.pinning) return;
+    if (a.cooling) {
+      var ok = window.confirm(
+        '「' + a.name + '」正在冷却（' + fmtLeft(a.cooldownRemainingMs) + '）。\n' +
+          '切过去会解除它的冷却，接下来的请求会直接打到这个账号。继续吗？'
+      );
+      if (!ok) return;
+    }
+    state.pinning = true;
+    if (btn) { btn.disabled = true; btn.textContent = '切换中…'; }
+    fetch('/admin/current', {
+      method: 'POST',
+      headers: Object.assign({ 'content-type': 'application/json' }, authHeaders()),
+      body: JSON.stringify({ index: a.index }),
+      cache: 'no-store'
+    })
+      .then(asJson)
+      .then(function (o) {
+        state.pinning = false;
+        if (!o.ok) {
+          var msg = (o.body && o.body.error && o.body.error.message) || ('HTTP ' + o.status);
+          if (o.status === 401) openUnlockGate('密钥不正确，请重试', false);
+          toast('切换失败：' + msg, true);
+          if (btn) { btn.disabled = false; btn.textContent = '设为当前'; }
+          return;
+        }
+        toast('已切到「' + o.body.name + '」' + (o.body.clearedCooldown ? '，冷却已解除' : ''));
+        load();
+      })
+      .catch(function (e) {
+        state.pinning = false;
+        toast('切换失败：' + e.message, true);
+        if (btn) { btn.disabled = false; btn.textContent = '设为当前'; }
+      });
+  }
+
+  $('refresh').addEventListener('click', load);  $('auto').addEventListener('change', schedule);
   $('keyBtn').addEventListener('click', openKeyDialog);
   $('setKey').addEventListener('click', function () { openUnlockGate('输入新的 serverApiKey', false); });
   $('gateCancel').addEventListener('click', closeGate);

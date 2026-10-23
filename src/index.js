@@ -7,7 +7,7 @@ import { createServer } from './server.js';
 import { resolveToken, scanToken, setRecaptureHandler } from './auth-codebuddy.js';
 import { runRecapture } from './recapture.js';
 import { buildStatus, formatStatus } from './status.js';
-import { expandAccountSource } from './store-wbs.js';
+import { mergeAccounts, watchAccountStore } from './pool-reload.js';
 import { expandHome, redact } from './util.js';
 
 const CONFIG_DEFAULT = path.join(process.cwd(), 'config.json');
@@ -156,28 +156,32 @@ async function main() {
   // The pool can be sourced from the workbuddy-switch account store instead of a
   // hand-maintained accounts[] list. The store stays the single source of truth:
   // bridge-ai mints from it and writes rotated tokens back there.
-  if (cfg.accountSource && (!cfg.accountSource.type || cfg.accountSource.type === 'wb-switch')) {
+  //
+  // `staticAccounts` is kept aside so a live reload can re-merge the store with
+  // the same config list (cfg.accounts gets the merged result below).
+  const staticAccounts = Array.isArray(cfg.accounts) ? cfg.accounts.slice() : [];
+  const source =
+    cfg.accountSource && (!cfg.accountSource.type || cfg.accountSource.type === 'wb-switch') ? cfg.accountSource : null;
+  if (source) {
     try {
-      const exp = expandAccountSource(cfg.accountSource);
-      const staticUids = new Set((cfg.accounts || []).map((a) => a.auth && a.auth.userId).filter(Boolean));
-      const dupes = exp.entries.filter((e) => staticUids.has(e.wbs.uid));
-      const fromStore = exp.entries.filter((e) => !staticUids.has(e.wbs.uid));
-      cfg.accounts = [...fromStore, ...(cfg.accounts || [])];
+      const merged = mergeAccounts(source, staticAccounts);
+      cfg.accounts = merged.accounts;
+      const fromConfig = merged.accounts.length - merged.fromStore.length;
       console.log(
-        `[bridge] accountSource=wb-switch ${exp.file}: store has ${exp.total}, using ${fromStore.length}` +
-          (cfg.accounts.length - fromStore.length ? `, plus ${cfg.accounts.length - fromStore.length} from config` : '')
+        `[bridge] accountSource=wb-switch ${merged.file}: store has ${merged.total}, using ${merged.fromStore.length}` +
+          (fromConfig ? `, plus ${fromConfig} from config` : '')
       );
-      for (const d of dupes) {
+      for (const d of merged.dupes) {
         console.warn(
           `[bridge] WARNING: an accounts[] entry has the same uid as "${d.name}" in the store — skipped the store one. ` +
             `Remove the static entry, otherwise two copies of one token chain will fight over rotation.`
         );
       }
-      for (const s of exp.skipped) console.log(`[bridge] accountSource skipped "${s.name}": ${s.reason}`);
+      for (const s of merged.skipped) console.log(`[bridge] accountSource skipped "${s.name}": ${s.reason}`);
     } catch (e) {
       const msg = String((e && e.message) || e);
       const noStore = /cannot read .*store|ENOENT|no such file/i.test(msg);
-      if (noStore && !(cfg.accounts || []).length) {
+      if (noStore && !staticAccounts.length) {
         // A fresh clone has no workbuddy-switch library yet. Booting with an
         // empty pool is far more useful than exiting: the dashboard comes up,
         // /healthz answers, and every chat call explains what is missing.
@@ -191,7 +195,7 @@ async function main() {
         // A store that exists but is corrupt/unreadable is a real error: stop,
         // otherwise the bridge silently serves from a half-broken pool.
         console.error(`[bridge] accountSource failed: ${msg}`);
-        if (!(cfg.accounts || []).length) process.exit(1);
+        if (!staticAccounts.length) process.exit(1);
       }
     }
   }
@@ -220,7 +224,28 @@ async function main() {
 
   if (cmd === 'server') {
     const freshKey = ensureServerKey(cfg, configPath);
-    const server = createServer({ config: cfg, pool, configPath });
+    // Live account reload: the store is owned by workbuddy-switch and can change
+    // under us (accounts added/removed, tokens rotated). `reloader` is filled in
+    // right after the server exists, because the rotation pointer lives there.
+    let reloader = null;
+    const server = createServer({
+      config: cfg,
+      pool,
+      configPath,
+      reloadAccounts: () =>
+        reloader ? reloader.apply('manual') : { ok: false, error: 'no account store is being watched' },
+    });
+    if (source) {
+      reloader = watchAccountStore({
+        source,
+        staticAccounts,
+        pool,
+        rotation: server.rotation,
+        log: (m) => console.log(m),
+        warn: (m) => console.warn(m),
+      });
+      if (reloader) console.log(`[bridge] watching ${reloader.file} — accounts added there show up without a restart`);
+    }
     const listen = cfg.listen || {};
     const host = listen.host || '127.0.0.1';
     const port = listen.port || 8787;
@@ -261,6 +286,7 @@ async function main() {
       }
     });
     const shutdown = () => {
+      if (reloader) reloader.close();
       server.close(() => process.exit(0));
       setTimeout(() => process.exit(0), 2000).unref();
     };

@@ -61,7 +61,7 @@ function filterOutHeaders(h) {
   return out;
 }
 
-export function createServer({ config, pool, configPath = null }) {
+export function createServer({ config, pool, configPath = null, reloadAccounts = null }) {
   const provider = config.provider || {};
   const hosts = provider.hosts && provider.hosts.length
     ? provider.hosts
@@ -574,6 +574,50 @@ export function createServer({ config, pool, configPath = null }) {
     }
   }
 
+  // POST /admin/current {"index": n} — pin the rotation pointer to one account.
+  // Only meaningful in sticky mode (the default): in lru every request re-picks.
+  async function handleSetCurrent(req, res) {
+    let body = null;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      body = null;
+    }
+    const i = body ? Number(body.index) : NaN;
+    if (!Number.isInteger(i) || i < 0 || i >= pool.length) {
+      return sendJson(res, 400, {
+        error: { message: `index must be an integer in 0..${Math.max(0, pool.length - 1)}` },
+      });
+    }
+    if (rotation.mode !== 'sticky') {
+      return sendJson(res, 409, {
+        error: {
+          message:
+            'rotation.mode is "lru", so every request re-picks an account and a manual pin would not stick — set rotation.mode to "sticky" and restart',
+        },
+      });
+    }
+    const account = pool[i];
+    // A deliberate human override: lift the cooldown too, otherwise the pointer
+    // would land on an account that every request immediately skips.
+    const wasCooling = Date.now() < account.exhaustedUntil;
+    account.exhaustedUntil = 0;
+    account.consecutiveFails = 0;
+    rotation.index = i;
+    rotation.switchedAt = Date.now();
+    rotation.manualAt = Date.now();
+    console.log(
+      `[bridge] current account pinned to "${account.name}" (index ${i}) from the dashboard` +
+        (wasCooling ? ' — cooldown cleared' : '')
+    );
+    return sendJson(res, 200, {
+      ok: true,
+      index: i,
+      name: account.name,
+      clearedCooldown: wasCooling,
+    });
+  }
+
   const handler = (req, res) => {
     if (req.url === '/healthz') {
       res.writeHead(200, { 'content-type': 'text/plain' });
@@ -616,6 +660,41 @@ export function createServer({ config, pool, configPath = null }) {
       });
       return;
     }
+    // Re-read the account store on demand. The store is watched while the server
+    // runs, so this is the escape hatch (watch unavailable, network path, …).
+    if (req.method === 'POST' && pathname === '/admin/reload') {
+      if (!isLoopback(req) && !serverAuthOk(req)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'unauthorized: missing or invalid server api key' } }));
+        return;
+      }
+      if (!reloadAccounts) {
+        sendJson(res, 501, { error: { message: 'this instance is not reading an account store' } });
+        return;
+      }
+      let out;
+      try {
+        out = reloadAccounts();
+      } catch (e) {
+        out = { ok: false, error: String((e && e.message) || e) };
+      }
+      sendJson(res, out && out.ok === false ? 500 : 200, out);
+      return;
+    }
+    // Pick which account is "current" by hand instead of waiting for a failure.
+    // A write, so the same gate as rotating the key: loopback is free, the
+    // network needs the current key.
+    if (req.method === 'POST' && pathname === '/admin/current') {
+      if (!isLoopback(req) && !serverAuthOk(req)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'unauthorized: missing or invalid server api key' } }));
+        return;
+      }
+      handleSetCurrent(req, res).catch((e) => {
+        if (!res.headersSent) sendJson(res, 500, { error: { message: String((e && e.message) || e) } });
+      });
+      return;
+    }
     if (!serverAuthOk(req)) {
       res.writeHead(401, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: { message: 'unauthorized: missing or invalid server api key' } }));
@@ -634,5 +713,9 @@ export function createServer({ config, pool, configPath = null }) {
     res.end(JSON.stringify({ error: { message: 'not found' } }));
   };
 
-  return http.createServer(handler);
+  const srv = http.createServer(handler);
+  // A live account reload rebuilds `pool` in place and remaps the rotation
+  // pointer, so the pointer has to be reachable from the reloader (index.js).
+  srv.rotation = rotation;
+  return srv;
 }

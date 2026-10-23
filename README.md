@@ -192,6 +192,8 @@ While the server runs, open `http://127.0.0.1:8787/admin` (or just `/`). It list
 
 The account that is currently serving traffic is marked `当前` ("current"), and the header shows the rotation mode plus how many times the pointer has moved.
 
+**Picking the current account by hand.** Every other row has a 设为当前 ("make current") button: it moves the sticky pointer to that account, so the next request goes there instead of waiting for a failure to rotate. Two details worth knowing: the click also lifts that account's cooldown (otherwise the pointer would sit on an account every request skips — the dashboard asks first when that is about to happen), and it does **not** freeze the account: if it hits an account-level error, normal rotation carries on from there. The button is disabled when `rotation.mode` is `lru`, because that mode re-picks per request and has no pointer to move.
+
 It polls every 3s and is a single self-contained file (`src/dashboard.html`): no build step, no CDN, no external assets.
 
 **Access-key dialog (top-right 访问密钥).** Shows the bridge's own key — the one clients send as `Authorization: Bearer <key>` — in clear text, with *copy*, *randomise* (32 bytes → 64 hex) and *apply*. The new key is written to `config.json` **first** and only then swapped into the running process, so the file and the process can never disagree, and it takes effect **without a restart**; the browser also stores it so its own 3s polling does not 401 itself. A dialog the user opened is never closed by the refresh — auto-polling pauses while any dialog is open.
@@ -201,6 +203,8 @@ Endpoints:
 - `GET /admin` — the page itself (contains no data, so no key required).
 - `GET /admin/pool` — the same data as JSON. **Free over loopback**, key-gated everywhere else: callers from another machine need `listen.serverApiKey` via `Authorization: Bearer <key>`, `x-api-key: <key>`, or `?key=<key>`.
 - `GET /admin/server-key` — current access key, plus where it lives. `POST /admin/server-key` with `{"key":"…"}` rotates it (16–256 chars of `A-Z a-z 0-9 . _ ~ + / -`). Same gate as `/admin/pool`, so rotating from the LAN requires the **current** key.
+- `POST /admin/current` with `{"index": 3}` — pin the rotation pointer to `pool[3]` (what the 设为当前 button calls). Answers `{"ok":true,"index":3,"name":"…","clearedCooldown":false}`; `400` for a bad index, `409` when `rotation.mode` is `lru`. Same gate as the key endpoint, since it changes behaviour.
+- `POST /admin/reload` — re-read the account store immediately (see [5c](#5c-sharing-the-account-library-with-workbuddy-switch)).
 - The page asks for the key once and stores it in `localStorage`; a deep link like `/admin?key=<key>` also works.
 - `node src/index.js status [--json]` prints the same view in the terminal by querying the running server (and says so explicitly when it can't reach it, instead of pretending the pool is idle).
 - Counters live in process memory and reset on restart. Account tokens are never exposed — only a masked preview plus expiry timestamps; the access key is the only secret shown in clear, because it exists to be copied.
@@ -214,7 +218,7 @@ Endpoints:
 "accounts": []
 ```
 
-`path` is optional (defaults to `~/.wb-switch/accounts.json`, overridable with `WBS_ACCOUNTS`). Restart the bridge after adding or removing accounts in workbuddy-switch — the pool is expanded at startup and every account shows up in `/admin`.
+`path` is optional (defaults to `~/.wb-switch/accounts.json`, overridable with `WBS_ACCOUNTS`). The store is watched while the bridge runs: adding, removing or re-logging an account in workbuddy-switch reaches the pool — and `/admin` — within a second, no restart. `POST /admin/reload` forces a re-read (same key rules as the pool view). Runtime counters and cooldowns survive a reload; the "current" sticker stays on the same account even if the order changes.
 
 How it stays consistent:
 
