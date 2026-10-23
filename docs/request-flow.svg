@@ -1,0 +1,285 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 1610" width="1320" height="1610" role="img" aria-label="bridge-ai 多账号请求分发流程">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#4a6b92"/>
+    </marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#3fb950"/>
+    </marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#f85149"/>
+    </marker>
+    <marker id="ay" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#d29922"/>
+    </marker>
+    <style>
+      .ttl { font: 600 22px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #e8eef7; }
+      .sub { font: 12.5px ui-monospace, Consolas, monospace; fill: #7d8ea8; }
+      .bt  { font: 600 13px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #e8eef7; }
+      .bd  { font: 11px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #93a3bb; }
+      .num { font: 600 10.5px "Segoe UI", sans-serif; fill: #0d1117; }
+      .lbl { font: 600 10.5px "Segoe UI", "PingFang SC", sans-serif; fill: #7d8ea8; }
+      .cardt { font: 600 12.5px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #dbe5f3; }
+      .th { font: 600 10.5px "Segoe UI", "PingFang SC", sans-serif; fill: #6f819b; letter-spacing: .06em; }
+      .td1 { font: 11.5px ui-monospace, Consolas, monospace; fill: #c8d6e8; }
+      .td2 { font: 11px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #93a3bb; }
+      .chip { font: 600 11px "Segoe UI", "PingFang SC", sans-serif; fill: #dbe5f3; }
+      .ct { font: 600 12px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .cd { font: 10.5px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #93a3bb; }
+      .box { fill: #141b26; stroke: #2a3648; stroke-width: 1.2; }
+      .dia { fill: #171f2b; stroke: #3a4a63; stroke-width: 1.2; }
+      .lnk { stroke: #4a6b92; stroke-width: 1.4; fill: none; }
+      .lnkg { stroke: #3fb950; stroke-width: 1.4; fill: none; }
+      .lnkr { stroke: #f85149; stroke-width: 1.4; fill: none; }
+      .lnky { stroke: #d29922; stroke-width: 1.4; fill: none; }
+      .lnkd { stroke: #3a4a63; stroke-width: 1.2; fill: none; stroke-dasharray: 5 4; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1320" height="1610" fill="#0d1117"/>
+
+  <text class="ttl" x="56" y="52">多账号请求分发流程</text>
+  <text class="sub" x="56" y="78">POST /v1/chat/completions · rotation.mode = sticky · src/server.js → attempt() / src/accounts.js</text>
+
+  <!-- ================= 主链路 ================= -->
+
+  <!-- 1 start -->
+  <rect class="box" x="100" y="100" width="370" height="52" rx="9" stroke="#35628f"/>
+  <text class="bt" x="120" y="132">客户端请求 /v1/chat/completions</text>
+
+  <!-- 2 gate -->
+  <rect class="box" x="100" y="184" width="370" height="84" rx="9"/>
+  <circle cx="122" cy="208" r="10" fill="#4a9eff"/>
+  <text class="num" x="122" y="212" text-anchor="middle">1</text>
+  <text class="bt" x="142" y="212">入口鉴权（本服务自己的 key）</text>
+  <text class="bd" x="142" y="234">loopback 免密钥；局域网需 Bearer / x-api-key</text>
+  <text class="bd" x="142" y="252">不通过 → 401 unauthorized，不进账号池</text>
+
+  <!-- 3 parse -->
+  <rect class="box" x="100" y="300" width="370" height="66" rx="9"/>
+  <circle cx="122" cy="322" r="10" fill="#4a9eff"/>
+  <text class="num" x="122" y="326" text-anchor="middle">2</text>
+  <text class="bt" x="142" y="326">解析请求</text>
+  <text class="bd" x="142" y="346">非法 JSON → 400；上游只收流式，强制 stream=true</text>
+  <text class="bd" x="142" y="362">可选 sanitize 改写已知 harness 指纹</text>
+
+  <!-- 4 attempt -->
+  <rect class="box" x="100" y="398" width="370" height="52" rx="9"/>
+  <circle cx="122" cy="424" r="10" fill="#4a9eff"/>
+  <text class="num" x="122" y="428" text-anchor="middle">3</text>
+  <text class="bt" x="142" y="428">attempt(attempted = ∅)</text>
+
+  <!-- loop container -->
+  <rect x="72" y="478" width="426" height="1074" rx="12" fill="none" stroke="#2f4a68" stroke-width="1.2" stroke-dasharray="7 5"/>
+  <text class="lbl" x="92" y="502">attempt 循环 · 每个账号一次</text>
+
+  <!-- d1 pick -->
+  <path class="dia" d="M285 516 L435 570 L285 624 L135 570 Z"/>
+  <text class="bt" x="285" y="558" text-anchor="middle">④ pickAccount(attempted)</text>
+  <text class="bt" x="285" y="578" text-anchor="middle" style="font-weight:400">有可用账号？</text>
+  <text class="bd" x="285" y="596" text-anchor="middle">跳过已试 / 冷却中</text>
+
+  <!-- s5 -->
+  <rect class="box" x="100" y="656" width="370" height="66" rx="9"/>
+  <circle cx="122" cy="680" r="10" fill="#4a9eff"/>
+  <text class="num" x="122" y="684" text-anchor="middle">5</text>
+  <text class="bt" x="142" y="684">占位与记账</text>
+  <text class="bd" x="142" y="704">attempted.add · markUsed · beginCall（先计数，后取 token）</text>
+  <text class="bd" x="142" y="716"> </text>
+
+  <!-- d2 token -->
+  <path class="dia" d="M285 752 L435 806 L285 860 L135 806 Z"/>
+  <text class="bt" x="285" y="794" text-anchor="middle">⑥ resolveToken()</text>
+  <text class="bt" x="285" y="814" text-anchor="middle" style="font-weight:400">拿到 access token？</text>
+  <text class="bd" x="285" y="832" text-anchor="middle">apikey · wbs · refresh · token</text>
+
+  <!-- s6 -->
+  <rect class="box" x="100" y="892" width="370" height="60" rx="9"/>
+  <circle cx="122" cy="914" r="10" fill="#4a9eff"/>
+  <text class="num" x="122" y="918" text-anchor="middle">7</text>
+  <text class="bt" x="142" y="918">生成会话 ID</text>
+  <text class="bd" x="142" y="938">X-Conversation-ID = f(messages[0])　sessionMode=prefix</text>
+
+  <!-- s7 -->
+  <rect class="box" x="100" y="984" width="370" height="90" rx="9"/>
+  <circle cx="122" cy="1006" r="10" fill="#4a9eff"/>
+  <text class="num" x="122" y="1010" text-anchor="middle">8</text>
+  <text class="bt" x="142" y="1010">轮询 host 发送</text>
+  <text class="bd" x="142" y="1030">POST https://&lt;host&gt;/v2/chat/completions</text>
+  <text class="bd" x="142" y="1048">账号可 pin chatHosts；round 0..N 遇 11128 换 trace 重放</text>
+  <text class="bd" x="142" y="1066">同一账号、同一 payload，不清冷却</text>
+
+  <!-- d3 200 -->
+  <path class="dia" d="M285 1104 L435 1158 L285 1212 L135 1158 Z"/>
+  <text class="bt" x="285" y="1150" text-anchor="middle">⑨ 上游返回 200？</text>
+  <text class="bd" x="285" y="1170" text-anchor="middle">首帧 SSE 无 error 才算成功</text>
+
+  <!-- s8 classify -->
+  <rect class="box" x="100" y="1244" width="370" height="80" rx="9"/>
+  <circle cx="122" cy="1266" r="10" fill="#d29922"/>
+  <text class="num" x="122" y="1270" text-anchor="middle">10</text>
+  <text class="bt" x="142" y="1270">失败归类</text>
+  <text class="bd" x="142" y="1290">状态码决定冷却时长与是否换号</text>
+  <text class="bd" x="142" y="1308">请求级错误（400 / 404 / 422）不换号，原样返回</text>
+
+  <!-- s9 rotate -->
+  <rect class="box" x="100" y="1356" width="370" height="66" rx="9"/>
+  <circle cx="122" cy="1378" r="10" fill="#a371f7"/>
+  <text class="num" x="122" y="1382" text-anchor="middle">11</text>
+  <text class="bt" x="142" y="1382">advanceRotation(pool, account)</text>
+  <text class="bd" x="142" y="1402">指针 = (i + 1) % pool.length · switches++</text>
+
+  <!-- s10 throw -->
+  <rect class="box" x="100" y="1454" width="370" height="66" rx="9" stroke="#5b3038"/>
+  <circle cx="122" cy="1476" r="10" fill="#f85149"/>
+  <text class="num" x="122" y="1480" text-anchor="middle">12</text>
+  <text class="bt" x="142" y="1480">抛出最后的错误</text>
+  <text class="bd" x="142" y="1500">502 / 上游状态码；池空或全池冷却 → 503</text>
+
+  <!-- arrows spine -->
+  <path class="lnk" d="M285 152 V184" marker-end="url(#a)"/>
+  <path class="lnk" d="M285 268 V300" marker-end="url(#a)"/>
+  <path class="lnk" d="M285 366 V398" marker-end="url(#a)"/>
+  <path class="lnk" d="M285 450 V516" marker-end="url(#a)"/>
+  <path class="lnk" d="M285 624 V656" marker-end="url(#a)"/>
+  <path class="lnk" d="M285 722 V752" marker-end="url(#a)"/>
+  <path class="lnk" d="M285 860 V892" marker-end="url(#a)"/>
+  <path class="lnk" d="M285 952 V984" marker-end="url(#a)"/>
+  <path class="lnk" d="M285 1074 V1104" marker-end="url(#a)"/>
+  <path class="lnk" d="M285 1212 V1244" marker-end="url(#a)"/>
+  <path class="lnk" d="M285 1324 V1356" marker-end="url(#a)"/>
+  <path class="lnk" d="M285 1422 V1454" marker-end="url(#a)"/>
+
+  <!-- loop back -->
+  <path class="lnk" d="M100 1389 H86 V570 H133" marker-end="url(#a)"/>
+  <text class="lbl" x="60" y="1080" transform="rotate(-90 60 1080)" text-anchor="middle">账号级失败 → 换号重试</text>
+  <text class="lbl" x="300" y="1444">已试完全部账号</text>
+
+  <!-- labels on branches -->
+  <text class="lbl" x="494" y="564">否</text>
+  <text class="lbl" x="494" y="800">否</text>
+  <text class="lbl" x="494" y="1152">是</text>
+
+  <!-- ================= 分支结果 ================= -->
+
+  <!-- 401 -->
+  <path class="lnkr" d="M470 221 H528" marker-end="url(#ar)"/>
+  <rect x="530" y="190" width="272" height="62" rx="9" fill="#1d1216" stroke="#5b3038"/>
+  <text class="ct" x="546" y="214" fill="#ff8b82">401 unauthorized</text>
+  <text class="cd" x="546" y="234">直接拒绝，不产生冷却、不计入账号</text>
+
+  <!-- 503 -->
+  <path class="lnkr" d="M435 570 H528" marker-end="url(#ar)"/>
+  <rect x="530" y="534" width="272" height="76" rx="9" fill="#1d1216" stroke="#5b3038"/>
+  <text class="ct" x="546" y="558" fill="#ff8b82">503 无账号可用</text>
+  <text class="cd" x="546" y="578">池空：no account configured</text>
+  <text class="cd" x="546" y="596">否则 all accounts unavailable (n/m tried)</text>
+
+  <!-- token fail -->
+  <path class="lnky" d="M435 806 H528" marker-end="url(#ay)"/>
+  <rect x="530" y="772" width="272" height="74" rx="9" fill="#1e1a10" stroke="#5d4a1d"/>
+  <text class="ct" x="546" y="796" fill="#e3b341">token 获取失败</text>
+  <text class="cd" x="546" y="816">markAuthError + 冷却 errorCooldownMs</text>
+  <text class="cd" x="546" y="834">换号重试；无号可换则抛出</text>
+
+  <!-- ok -->
+  <path class="lnkg" d="M435 1158 H528" marker-end="url(#ag)"/>
+  <rect x="530" y="1122" width="272" height="72" rx="9" fill="#101d16" stroke="#255c38"/>
+  <text class="ct" x="546" y="1146" fill="#56d364">200 → 成功返回</text>
+  <text class="cd" x="546" y="1166">settle(ok) · clearError</text>
+  <text class="cd" x="546" y="1184">SSE 直接 pipe 给客户端</text>
+
+  <!-- ================= 右侧说明卡 ================= -->
+
+  <!-- card 1 pointer -->
+  <rect x="846" y="94" width="430" height="196" rx="11" fill="#111823" stroke="#243044"/>
+  <text class="cardt" x="866" y="120">sticky 指针：谁是「当前账号」</text>
+  <rect x="866" y="136" width="126" height="34" rx="8" fill="#16304a" stroke="#35628f"/>
+  <text class="chip" x="929" y="158" text-anchor="middle" fill="#8ecbff">账号 1</text>
+  <rect x="1002" y="136" width="126" height="34" rx="8" fill="#151c27" stroke="#2a3648"/>
+  <text class="chip" x="1065" y="158" text-anchor="middle">账号 2</text>
+  <rect x="1138" y="136" width="126" height="34" rx="8" fill="#151c27" stroke="#2a3648"/>
+  <text class="chip" x="1201" y="158" text-anchor="middle">账号 3</text>
+  <path class="lnkd" d="M1201 176 V186 H929 V176" marker-end="url(#a)"/>
+  <text class="td2" x="866" y="212">请求全部走「当前」；只有账号级失败才把指针移到下一个。</text>
+  <text class="td2" x="866" y="232">账号 3 之后回到账号 1，环形复用，不做 per-request 负载均衡。</text>
+  <text class="td2" x="866" y="252">rotation.mode = lru 时才按「最久未用」逐请求挑选。</text>
+  <text class="td2" x="866" y="272" fill="#6f819b">指针在内存里，重启后回到账号 1。</text>
+
+  <!-- card 2 error table -->
+  <rect x="846" y="310" width="430" height="366" rx="11" fill="#111823" stroke="#243044"/>
+  <text class="cardt" x="866" y="336">失败归类 → 是否换号</text>
+  <line x1="866" y1="350" x2="1256" y2="350" stroke="#243044"/>
+  <text class="th" x="866" y="368">上游结果</text>
+  <text class="th" x="1010" y="368">动作</text>
+
+  <text class="td1" x="866" y="394">429 quota</text>
+  <text class="td2" x="1010" y="394">冷却 1h（rotation.cooldownMs）· 换号</text>
+  <line x1="866" y1="406" x2="1256" y2="406" stroke="#1c2534"/>
+
+  <text class="td1" x="866" y="428">401 / 403</text>
+  <text class="td2" x="1010" y="428">refreshToken · 冷却 60s · 换号</text>
+  <line x1="866" y1="440" x2="1256" y2="440" stroke="#1c2534"/>
+
+  <text class="td1" x="866" y="462">5xx</text>
+  <text class="td2" x="1010" y="462">冷却 errorCooldownMs 60s · 换号</text>
+  <line x1="866" y1="474" x2="1256" y2="474" stroke="#1c2534"/>
+
+  <text class="td1" x="866" y="496">stream error</text>
+  <text class="td2" x="1010" y="496">冷却 60s · 换号</text>
+  <line x1="866" y1="508" x2="1256" y2="508" stroke="#1c2534"/>
+
+  <text class="td1" x="866" y="530">network / timeout</text>
+  <text class="td2" x="1010" y="530">冷却 60s · 换号</text>
+  <line x1="866" y1="542" x2="1256" y2="542" stroke="#1c2534"/>
+
+  <text class="td1" x="866" y="564">400 / 404 / 422</text>
+  <text class="td2" x="1010" y="564" fill="#9fb2c9">不冷却 · 不换号 · 原样返回</text>
+  <line x1="866" y1="576" x2="1256" y2="576" stroke="#1c2534"/>
+
+  <text class="td1" x="866" y="598">11128 channel</text>
+  <text class="td2" x="1010" y="598" fill="#9fb2c9">同账号重放 ≤N 次 · 不惩罚账号</text>
+
+  <text class="td2" x="866" y="630" fill="#6f819b">冷却中的账号会被 pickAccount 跳过；</text>
+  <text class="td2" x="866" y="648" fill="#6f819b">全池冷却或全试完 → 503，而不是死循环。</text>
+
+  <!-- card 3 counters -->
+  <rect x="846" y="696" width="430" height="200" rx="11" fill="#111823" stroke="#243044"/>
+  <text class="cardt" x="866" y="722">每次尝试都留痕</text>
+  <text class="td2" x="866" y="748">· beginCall 在 resolveToken 之前，凭证坏掉的账号</text>
+  <text class="td2" x="880" y="766">也会出现在看板上，而不是显示零流量</text>
+  <text class="td2" x="866" y="790">· 计数：inFlight / total / ok / fail / lastStatus</text>
+  <text class="td2" x="866" y="812">· lastError 记成 quota / http 5xx / auth:401 /</text>
+  <text class="td2" x="880" y="830">network / stream_error / token</text>
+  <text class="td2" x="866" y="854">· 冷却到期自动恢复，不用重启进程</text>
+  <text class="td2" x="866" y="876" fill="#6f819b">· 看板 /admin/pool 与 npm run status 读同一份内存</text>
+
+  <!-- card 4 invariants -->
+  <rect x="846" y="916" width="430" height="222" rx="11" fill="#111823" stroke="#243044"/>
+  <text class="cardt" x="866" y="942">几条不变量</text>
+  <text class="td2" x="866" y="968">· 一次客户端请求最多尝试 pool.length 个账号，</text>
+  <text class="td2" x="880" y="986">attempted 集合保证不会回头重试同一个</text>
+  <text class="td2" x="866" y="1010">· 换号不影响会话 ID，prompt cache 仍能命中</text>
+  <text class="td2" x="866" y="1032">· 只有账号级失败才动指针；请求级错误不动</text>
+  <text class="td2" x="866" y="1054">· 400 / 404 / 422 立刻返回，不烧掉其它账号</text>
+  <text class="td2" x="866" y="1076">· 503 只在「没有账号可试」时出现，不是兜底重试</text>
+  <text class="td2" x="866" y="1098" fill="#6f819b">· 上游只支持流式，故 stream 恒为 true</text>
+  <text class="td2" x="866" y="1120" fill="#6f819b">· 客户端 key 与账号 token 是两套凭证</text>
+
+  <!-- card 5 config -->
+  <rect x="846" y="1160" width="430" height="290" rx="11" fill="#111823" stroke="#243044"/>
+  <text class="cardt" x="866" y="1186">相关配置</text>
+  <text class="td1" x="866" y="1214">rotation.mode</text>
+  <text class="td2" x="866" y="1232" fill="#9fb2c9">sticky（默认，始终一个当前账号）| lru</text>
+  <text class="td1" x="866" y="1262">rotation.cooldownMs</text>
+  <text class="td2" x="866" y="1280" fill="#9fb2c9">429 之后的冷却，默认 1 小时</text>
+  <text class="td1" x="866" y="1310">rotation.errorCooldownMs</text>
+  <text class="td2" x="866" y="1328" fill="#9fb2c9">5xx / 网络 / 401 的冷却，默认 60 秒</text>
+  <text class="td1" x="866" y="1358">provider.sessionMode</text>
+  <text class="td2" x="866" y="1376" fill="#9fb2c9">prefix（默认）| stable | random</text>
+  <text class="td1" x="866" y="1406">provider.channelVerifyRetries</text>
+  <text class="td2" x="866" y="1424" fill="#9fb2c9">11128 的重放轮数</text>
+  <text class="td2" x="866" y="1446" fill="#6f819b">账号来源：accountSource = wb-switch</text>
+
+  <text class="sub" x="56" y="1584">实线箭头 = 请求流向；虚线 = 环形复用 / 状态归属。源码：src/server.js · src/accounts.js · src/quota.js</text>
+</svg>

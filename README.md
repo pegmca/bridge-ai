@@ -226,6 +226,8 @@ The current request is retried on each next account until one succeeds. When eve
 
 The live pointer is visible as `rotation` in `GET /admin/pool`, as the `当前` badge on the dashboard, and as `mode=sticky current=… switches=…` in `bridge status`.
 
+Flow diagram: [`docs/request-flow.svg`](docs/request-flow.svg) (the same file is embedded in [`docs/DESIGN.md`](docs/DESIGN.md); keep it in sync when `attempt()` changes).
+
 - Upstream hosts fail over in `provider.hosts` order within one account attempt.
 - For streaming responses, the first SSE chunk is peeked before headers are sent upstream; on an error event it fails over once within the same account.
 - A few gateway nodes return SSE as "comma-separated ASCII codes"; the bridge auto-decodes it back to normal SSE.

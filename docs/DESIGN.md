@@ -55,11 +55,21 @@ bridge (src/server.js · 原生 node:http，默认监听 127.0.0.1:8787，可绑
 
 ## 账号池与轮转（src/accounts.js / src/quota.js）
 
-- 每请求 `selectAccount` 选「最久未用且未冷却」的账号；`markUsed` 记录时间。
-- 上游 `401/403` → `markAuthError` + 清 token 缓存，重换（账号级，不再尝试其它主机）。
-- `429` → `markExhausted`，冷却 `rotation.cooldownMs` 后轮转下一账号。
-- `5xx` → 短冷却（≤60s）后重试。
-- 多主机按 `provider.hosts` 顺序故障切换；流式首段 SSE 窥探到 `error` 事件则本账号内失败切换一次。
+![多账号请求分发流程](./request-flow.svg)
+
+图源：`docs/request-flow.svg`（改动了 `handleChat` / `attempt()` / 轮转逻辑后请同步更新）。
+
+- 默认 `rotation.mode = "sticky"`：进程里只有一个「当前账号」指针 `rotation.index`，所有请求都走它；只有**账号级失败**才 `advanceRotation` 把指针移到下一个，环形复用。`lru` 保留旧行为（每请求挑最久未用的账号）。
+- 选号 `selectByRotation` 会跳过本请求已试过的 `attempted` 集合与冷却中的账号；全池冷却或试完 → `503 all accounts unavailable (n/m tried, k cooling)`；池空 → `503 no account configured`。
+- `429` → `markExhausted(rotation.cooldownMs，默认 1h)`，换号。
+- `401/403` → 清 token 缓存 + `markAuthError(errorCooldownMs，默认 60s)`，换号；账号级错误不再试该账号的其它主机。
+- `5xx` / SSE 流错误 / 网络超时 → `markExhausted(errorCooldownMs)`，换号。
+- `400/404/422` → 请求本身有问题，**不冷却、不换号**，原样回给客户端。
+- `11128`（渠道校验）→ 同一账号换 trace 头重放 `provider.channelVerifyRetries` 次，仍失败则返回，不惩罚账号。
+- 一次客户端请求最多尝试 `pool.length` 个账号（`attempted` 去重），不会无限重试。
+- 多主机按 `provider.hosts` 顺序故障切换；账号可 pin `chatHosts`（国际版走自己的 host）。
+- 会话 ID 由 `provider.sessionMode` 决定（默认 `prefix`：取 `messages[0]` 摘要），**换号不影响会话 ID**，prompt cache 仍能命中。
+- 每次尝试都先 `beginCall` 再取 token，所以凭证损坏的账号也会出现在看板计数里；`/admin/pool` 与 `npm run status` 读同一份内存态。
 - `logOutgoingBody`（默认关）可临时打印实际发给上游的 body（截断 8KB）用于核对，用完请改回，避免落盘对话内容。
 
 ## 部署（src/index.js + 腾讯云）
