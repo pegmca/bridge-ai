@@ -35,23 +35,13 @@ export function createPool(config) {
 //
 // The pool array is created once and shared with the HTTP server, so a refresh
 // mutates it *in place* instead of replacing it: every existing closure keeps
-// pointing at the same array. Runtime state (counters, cooldown) is carried over
-// for accounts that survive the reload, keyed by account identity — the uid for
-// store-backed accounts, the name otherwise.
-const RUNTIME_FIELDS = [
-  'lastUsedAt',
-  'exhaustedUntil',
-  'lastError',
-  'consecutiveFails',
-  'inFlight',
-  'totalRequests',
-  'okRequests',
-  'failRequests',
-  'lastStatus',
-  'lastOkAt',
-  'lastFailAt',
-];
-
+// pointing at the same array, and an account that survives the reload keeps its
+// **object**, not just its numbers. That matters: a call in flight holds a
+// reference to the account, and its endCall() decrements that object. Rebuilding
+// the objects and copying the counters across would leave the copy stuck at
+// inFlight=1 forever, because the decrement would land on the detached original
+// (a reload during a few parallel requests is enough to fake "3 busy" on an idle
+// account). Only the static fields are refreshed in place.
 export function accountKey(a) {
   if (a.origin && a.origin.uid) return `uid:${a.origin.uid}`;
   if (a.auth && a.auth.uid) return `uid:${a.auth.uid}`;
@@ -66,11 +56,16 @@ export function syncPool(pool, accountConfigs, rotation = null) {
   const next = createPool({ accounts: accountConfigs }).map((fresh) => {
     const old = prev.get(accountKey(fresh));
     if (!old) return fresh;
-    for (const f of RUNTIME_FIELDS) fresh[f] = old[f];
-    // A mode:"refresh" account keeps its rotated token in memory plus the hook
-    // that persists it; a rebuild must not fall back to the stale config value.
-    if (old.auth && old.auth.mode === 'refresh' && fresh.auth.mode === 'refresh') fresh.auth = old.auth;
-    return fresh;
+    old.index = fresh.index;
+    old.name = fresh.name;
+    old.type = fresh.type;
+    old.chatHosts = fresh.chatHosts;
+    old.needsSystemPrompt = fresh.needsSystemPrompt;
+    old.origin = fresh.origin;
+    // A mode:"refresh" account keeps the auth object it already holds: it carries
+    // the rotated refresh token in memory plus the hook that persists it.
+    if (!(old.auth && old.auth.mode === 'refresh')) old.auth = fresh.auth;
+    return old;
   });
   const nextKeys = new Set(next.map(accountKey));
   const added = next.filter((a) => !prev.has(accountKey(a))).map((a) => a.name);

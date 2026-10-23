@@ -78,7 +78,8 @@ bridge (src/server.js · 原生 node:http，默认监听 127.0.0.1:8787，可绑
 账号库 `~/.wb-switch/accounts.json` 由 workbuddy-switch 拥有，桥只是读者，所以它会变。
 
 - 启动时按 `accountSource` 展开一次；`server` 子命令随后监听**目录**（不是文件本身——写入方用原子 rename，监听 inode 会失效），文件名过滤 + 250 ms 去抖。
-- 变更后重新 `mergeAccounts` → `syncPool`：**原地** `splice` 同一个数组，所有闭包（HTTP server、轮转状态、计数）都还指向它；按 `uid`（无 uid 用 name）把 `totalRequests` / `okRequests` / `lastError` / `exhaustedUntil` 等运行时字段搬到新对象上。
+- 变更后重新 `mergeAccounts` → `syncPool`：**原地** `splice` 同一个数组，所有闭包（HTTP server、轮转状态、计数）都还指向它；**存活的账号保留原来的对象**，只就地刷新 `name` / `auth` / `chatHosts` / `origin` 等静态字段，计数器与冷却状态因此天然不变。
+- 为什么必须是同一个对象：在途请求的 `endCall()` 是对着那个账号对象递减 `inFlight` 的。若重载时重建对象再把数字拷过去，递减会落在已被移出池的旧对象上，新对象永远停在 `inFlight=1`——重载撞上几个并发请求，就会出现「账号明明闲着却显示 3 个并发、且 total ≠ ok+fail」的现象。
 - `rotation.index` 按 `accountKey` 重新定位，所以「当前账号」不因插队/重排而漂移；当前账号被删则回落到 0。
 - 只解析失败（写入方写到一半、JSON 坏）时**保留旧池**并打 warn，不会把账号清空。
 - 自身刷新 token 会写回账号库，同样触发一次重读；这种没有增减的变更不打印日志，避免每次续期都刷屏。
