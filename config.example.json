@@ -2,7 +2,7 @@
   "listen": {
     "host": "127.0.0.1",
     "port": 8787,
-    "serverApiKey": "OPTIONAL-set-this-to-require-a-key-on-incoming-requests"
+    "serverApiKey": "auto"
   },
   "logOutgoingBody": false,
   "logIncomingHeaders": false,

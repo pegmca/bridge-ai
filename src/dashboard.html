@@ -59,6 +59,9 @@
   td { padding: 11px 14px; border-bottom: 1px solid #1c222c; vertical-align: middle; white-space: nowrap; }
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: #171d26; }
+  .empty-row { padding: 28px 14px; text-align: center; color: var(--dim); font-size: 12.5px; white-space: normal; line-height: 1.8; }
+  .empty-row b { color: var(--muted); font-weight: 500; }
+  tr.empty:hover td { background: transparent; }
   .name { font-family: var(--mono); font-size: 13px; }
   .next { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px;
           font-size: 10.5px; color: #a8c6ff; background: #1d2c47; border: 1px solid #2b4470; }
@@ -134,7 +137,7 @@
     <div class="actions">
       <label class="toggle"><input type="checkbox" id="auto" checked> 自动刷新</label>
       <button id="refresh">刷新</button>
-      <button id="changeJwt" class="primary">访问密钥</button>
+      <button id="keyBtn" class="primary">访问密钥</button>
     </div>
   </header>
 
@@ -423,6 +426,23 @@
 
     var tbody = $('rows');
     tbody.innerHTML = '';
+    if (!d.accounts.length) {
+      // Fresh clone: an empty pool is normal, not an error. Say what to do.
+      var er = document.createElement('tr');
+      er.className = 'empty';
+      var etd = document.createElement('td');
+      etd.colSpan = 9;
+      etd.className = 'empty-row';
+      var l1 = document.createElement('div');
+      l1.textContent = '还没有账号，所以现在转发请求会返回 503。';
+      var l2 = document.createElement('div');
+      l2.innerHTML = '装好 <b>workbuddy-switch</b> 并在那里登录，账号会自动被读进来；' +
+        '或者在配置的 <b>accounts[]</b> 里加一条（README「1. Configuration」）。';
+      etd.appendChild(l1);
+      etd.appendChild(l2);
+      er.appendChild(etd);
+      tbody.appendChild(er);
+    }
     d.accounts.forEach(function (a) {
       var tr = document.createElement('tr');
 
@@ -499,10 +519,14 @@
 
     var notice = $('notice');
     notice.innerHTML = '';
-    if (!s.requireKey) {
+    // Only a warning when the bridge is actually reachable from elsewhere.
+    // Bound to loopback with no key is the shipped default, not a problem.
+    var bindHost = String(s.host || '127.0.0.1');
+    var exposed = !['127.0.0.1', '::1', 'localhost', ''].includes(bindHost);
+    if (!s.requireKey && exposed) {
       var n1 = document.createElement('div');
       n1.className = 'notice';
-      n1.textContent = '还没有设置访问密钥：局域网内任何人都能打开这个页面和 /admin/pool。点右上角「访问密钥」可以立刻生成一个。';
+      n1.textContent = '正在监听 ' + bindHost + ' 且没有设置访问密钥，同一网络的任何人都能调用它。点右上角「访问密钥」可以立刻生成一个。';
       notice.appendChild(n1);
     }
 
@@ -560,7 +584,7 @@
 
   $('refresh').addEventListener('click', load);
   $('auto').addEventListener('change', schedule);
-  $('changeJwt').addEventListener('click', openKeyDialog);
+  $('keyBtn').addEventListener('click', openKeyDialog);
   $('setKey').addEventListener('click', function () { openUnlockGate('输入新的 serverApiKey', false); });
   $('gateCancel').addEventListener('click', closeGate);
   $('keyClose').addEventListener('click', closeGate);

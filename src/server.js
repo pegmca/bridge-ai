@@ -191,7 +191,10 @@ export function createServer({ config, pool, configPath = null }) {
   // Mutable: the dashboard can rotate it at runtime (see handleServerKey), and a
   // restart must not be needed for the new value to take effect.
   const keyField = config.listen ? 'listen.serverApiKey' : 'serverApiKey';
-  let serverKey = (config.listen && config.listen.serverApiKey) || config.serverApiKey || null;
+  // "auto" only ever exists before the first start has minted a real key; treat
+  // it as "no key yet" rather than as a literal secret.
+  const rawKey = (config.listen && config.listen.serverApiKey) || config.serverApiKey || null;
+  let serverKey = rawKey && rawKey !== 'auto' ? rawKey : null;
 
   // Runtime counters surfaced by /admin/pool. `startedAt` is when this server
   // instance came up, not when the process started.
@@ -385,7 +388,7 @@ export function createServer({ config, pool, configPath = null }) {
         throw new UpstreamHttpError(
           503,
           pool.length === 0
-            ? 'no account configured'
+            ? 'no account configured — the pool is empty; add one via accountSource or accounts[] (see README "1. Configuration")'
             : `all accounts unavailable (${attempted.size}/${pool.length} tried, ${cooling} cooling)`
         );
       }

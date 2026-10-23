@@ -45,14 +45,43 @@ Zero-dependency Node implementation: OpenAI-compatible receiver → inject CodeB
   - refresh token (HS512, `typ:Offline`, ~30 days) — used to call `/v2/plugin/auth/token/refresh` to mint a new access token; **that endpoint also returns a new refresh token (rotatable).**
 - CodeBuddy does not persist these two tokens in plaintext on disk, so below we use a "refresh-and-mint" mode rather than reading files directly.
 
-### 1. Configuration
+### 1. Configuration (first start does it for you)
+
+`config.json` is gitignored because it holds this bridge's access key, so it is **created automatically** from the tracked `config.example.json` on the first start — no manual `cp`:
 
 ```bash
-cp config.example.json config.json
+git clone https://github.com/pegmca/bridge-ai.git && cd bridge-ai
+npm start
+# creates config.json, picks up the accounts already logged in to workbuddy-switch,
+# generates an access key on the first run, and prints:
+#
+#   dashboard  http://127.0.0.1:8787/admin  (200)
+#   access key 6f1c…  <- clients send  Authorization: Bearer 6f1c…
 ```
+
+What the first run does, in order:
+
+1. **`config.json`** — created from `config.example.json` (it is gitignored because it ends up holding the key).
+2. **Accounts** — read from the [workbuddy-switch](https://github.com/changexbc/workbuddy-switch) library at `~/.wb-switch/accounts.json`, so every account you already logged in there shows up on the dashboard with no editing. Entries with `variant: "ai"` are skipped unless you add `"ai"` to `accountSource.variants`. If the library does not exist the bridge still starts with an empty pool and says so.
+3. **Access key** — `listen.serverApiKey` ships as `"auto"`, which means *mint one now and write it back*. You end up with a 64-hex key stored in `config.json`; it stays the same across restarts. The dashboard's 访问密钥 dialog shows it in clear text with a copy button, and can rotate it.
+4. Then it listens on `127.0.0.1:8787` and serves `/admin`.
+
+So a fresh clone is callable immediately:
+
+```bash
+curl http://127.0.0.1:8787/v1/chat/completions \
+  -H "Authorization: Bearer <the key npm start printed>" \
+  -H 'content-type: application/json' \
+  -d '{"model":"x","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+Adding accounts later needs no config edit either — log in through workbuddy-switch again and restart; the pool picks it up. The manual routes still work: an `accounts[]` entry (modes below) or `scripts/capture-token.mjs` (see 2). `npm start` is a detached service; `npm run status`, `npm run stop`, `npm run restart` drive it, and its log is `tmp/cap/bridge.log`.
+
+A different config path: `BRIDGE_CONFIG=/path/to/config.json`, or `node src/index.js server --config <path>` (the service script always uses `./config.json`).
 
 Key fields in `config.json`:
 
+- `listen`: `{ "host": "127.0.0.1", "port": 8787, "serverApiKey": "auto" }`. `"auto"` = generate and persist a key on first start; replace it with a real string to pin one, or set `""` to disable incoming auth entirely (only sane while bound to loopback).
 - `provider.hosts` / `provider.path`: upstream host array + path. `hosts` defaults to `["wb.tencentbuddy.com","copilot.tencent.com"]`, `path` defaults to `/v2/chat/completions`.
 - `provider.identity`: identity headers to inject (defaults to `X-Product: SaaS`, `X-Domain: www.codebuddy.cn`).
 - `provider.channelVerifyRetries`: how many times to replay a request blocked by `11128` with fresh trace ids (default `3`).

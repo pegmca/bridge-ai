@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createPool } from './accounts.js';
@@ -10,6 +11,7 @@ import { expandAccountSource } from './store-wbs.js';
 import { expandHome, redact } from './util.js';
 
 const CONFIG_DEFAULT = path.join(process.cwd(), 'config.json');
+const CONFIG_EXAMPLE = 'config.example.json';
 
 function getConfigPath(argv) {
   const i = argv.indexOf('--config');
@@ -17,12 +19,70 @@ function getConfigPath(argv) {
   return process.env.BRIDGE_CONFIG || CONFIG_DEFAULT;
 }
 
+// First run after a clone: config.json is gitignored (it holds the access key),
+// so materialise it from the tracked template instead of failing with "config
+// not found". The bridge then starts with an empty account pool rather than
+// refusing to boot — an empty pool is a valid state that the dashboard explains.
+function seedFromExample(p) {
+  const candidates = [path.join(path.dirname(p), CONFIG_EXAMPLE), path.join(process.cwd(), CONFIG_EXAMPLE)];
+  for (const src of candidates) {
+    if (path.resolve(src) === path.resolve(p)) continue;
+    if (!fs.existsSync(src)) continue;
+    try {
+      fs.copyFileSync(src, p);
+      console.log(`[bridge] created ${p} from ${src}`);
+      console.log(`[bridge] no accounts yet — see README "1. Configuration" to add one.`);
+      return true;
+    } catch (e) {
+      console.error(`[bridge] could not create ${p}: ${e.message}`);
+      return false;
+    }
+  }
+  return false;
+}
+
 function loadConfig(p) {
-  if (!fs.existsSync(p)) {
-    console.error(`config not found at ${p} (copy config.example.json to config.json first)`);
+  if (!fs.existsSync(p) && !seedFromExample(p)) {
+    console.error(`config not found at ${p} (copy ${CONFIG_EXAMPLE} next to it, or pass --config <path>)`);
     process.exit(1);
   }
-  return JSON.parse(fs.readFileSync(p, 'utf8'));
+  let raw;
+  try {
+    raw = fs.readFileSync(p, 'utf8');
+  } catch (e) {
+    console.error(`cannot read ${p}: ${e.message}`);
+    process.exit(1);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    console.error(`${p} is not valid JSON: ${e.message}`);
+    process.exit(1);
+  }
+}
+
+// "auto" (the value shipped in config.example.json) means: mint an access key on
+// first start and write it back, so a fresh clone is callable without editing
+// anything. An explicit "" means "no incoming auth at all" and is left alone.
+const AUTO_KEY = 'auto';
+
+function ensureServerKey(cfg, configPath) {
+  const holder = cfg.listen && typeof cfg.listen === 'object' ? cfg.listen : cfg;
+  if (holder.serverApiKey !== AUTO_KEY) return null;
+
+  const key = crypto.randomBytes(32).toString('hex');
+  try {
+    const raw = fs.readFileSync(configPath, 'utf8');
+    const onDisk = JSON.parse(raw);
+    const target = onDisk.listen && typeof onDisk.listen === 'object' ? onDisk.listen : onDisk;
+    target.serverApiKey = key;
+    fs.writeFileSync(configPath, JSON.stringify(onDisk, null, 2) + (raw.endsWith('\n') ? '\n' : ''));
+  } catch (e) {
+    console.error(`[bridge] could not save the generated key to ${configPath}: ${e.message}`);
+    console.error('[bridge] using an in-memory key instead — it changes on restart.');
+  }
+  holder.serverApiKey = key;
+  return key;
 }
 
 // Persisted refresh tokens live in a sibling state file so the offline refresh
@@ -115,8 +175,24 @@ async function main() {
       }
       for (const s of exp.skipped) console.log(`[bridge] accountSource skipped "${s.name}": ${s.reason}`);
     } catch (e) {
-      console.error(`[bridge] accountSource failed: ${e.message}`);
-      if (!(cfg.accounts || []).length) process.exit(1);
+      const msg = String((e && e.message) || e);
+      const noStore = /cannot read .*store|ENOENT|no such file/i.test(msg);
+      if (noStore && !(cfg.accounts || []).length) {
+        // A fresh clone has no workbuddy-switch library yet. Booting with an
+        // empty pool is far more useful than exiting: the dashboard comes up,
+        // /healthz answers, and every chat call explains what is missing.
+        console.warn(`[bridge] ${msg}`);
+        console.warn('[bridge] account pool is empty — chat requests will answer 503 until an account is added.');
+        console.warn(
+          '[bridge] add one either by installing workbuddy-switch and logging in there, ' +
+            'or by putting an entry into accounts[] in the config (README "1. Configuration").'
+        );
+      } else {
+        // A store that exists but is corrupt/unreadable is a real error: stop,
+        // otherwise the bridge silently serves from a half-broken pool.
+        console.error(`[bridge] accountSource failed: ${msg}`);
+        if (!(cfg.accounts || []).length) process.exit(1);
+      }
     }
   }
 
@@ -143,10 +219,23 @@ async function main() {
   }
 
   if (cmd === 'server') {
+    const freshKey = ensureServerKey(cfg, configPath);
     const server = createServer({ config: cfg, pool, configPath });
     const listen = cfg.listen || {};
     const host = listen.host || '127.0.0.1';
     const port = listen.port || 8787;
+    // A busy or privileged port is the most common first-run failure; Node's raw
+    // stack trace says nothing useful about what to do next.
+    server.on('error', (e) => {
+      if (e.code === 'EADDRINUSE') {
+        console.error(`[bridge] port ${port} is already in use — set listen.port in ${configPath}, or stop whatever owns it.`);
+      } else if (e.code === 'EACCES') {
+        console.error(`[bridge] not allowed to bind ${host}:${port} — pick another listen.port (and prefer 127.0.0.1).`);
+      } else {
+        console.error(`[bridge] listen failed: ${e.message}`);
+      }
+      process.exit(1);
+    });
     server.listen(port, host, () => {
       const provider = cfg.provider || {};
       console.log(`[bridge] listening on http://${host}:${port}`);
@@ -155,7 +244,21 @@ async function main() {
           provider.hosts || [provider.baseUrl || 'wb.tencentbuddy.com']
         ).join(', ')} path=${provider.path || '/v2/chat/completions'}`
       );
-      console.log(`[bridge] accounts=${pool.map((a) => a.name).join(', ')}`);
+      console.log(
+        pool.length
+          ? `[bridge] accounts=${pool.map((a) => a.name).join(', ')}`
+          : '[bridge] accounts: none — open the dashboard, it explains how to add one'
+      );
+      if (freshKey) {
+        console.log('');
+        console.log('[bridge] generated an access key (saved to config.json):');
+        console.log(`[bridge]   ${freshKey}`);
+        console.log(`[bridge] clients send: Authorization: Bearer ${freshKey}`);
+        console.log('[bridge] copy it any time from the dashboard -> 访问密钥');
+        console.log('');
+      } else if (listen.serverApiKey) {
+        console.log('[bridge] clients send: Authorization: Bearer <the key in config.json> (dashboard -> 访问密钥)');
+      }
     });
     const shutdown = () => {
       server.close(() => process.exit(0));

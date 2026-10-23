@@ -80,7 +80,7 @@ export function buildStatus({ config, pool, startedAt, stats, rotation, now = Da
       uptimeMs: startedAt ? now - startedAt : null,
       host: listen.host || '127.0.0.1',
       port: listen.port || 8787,
-      requireKey: !!listen.serverApiKey,
+      requireKey: !!listen.serverApiKey && listen.serverApiKey !== 'auto',
       protocol: provider.protocol || 'codebuddy-native',
       hosts: provider.hosts || [],
       path: provider.path || '/v2/chat/completions',
