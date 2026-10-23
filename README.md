@@ -1,5 +1,7 @@
 # bridge-ai
 
+**English** · [简体中文](README.zh-CN.md)
+
 > ⚠️ **This project targets the [Tencent CodeBuddy](https://www.codebuddy.cn) CLI only** (`@tencent-ai/codebuddy-code`).
 > It maps a CodeBuddy subscription plan quota into an OpenAI-compatible HTTP endpoint, for use by a local harness or any OpenAI-protocol client.
 > It does **not** support other CLIs such as Claude Code / Codex / Kimi Code — those belong to other projects.
@@ -11,14 +13,34 @@ After the CodeBuddy CLI logs in, it holds a subscription token. Without modifyin
 - OpenAI-compatible receiver (local / remote) → inject CodeBuddy subscription token → forward to `wb.tencentbuddy.com` → SSE passthrough
 - Multi-account rotation, automatic refresh-token renewal & rotation, and upstream host failover
 
+## Requirements
+
+- **Node.js 18+**. No npm dependencies — `npm install` is not needed.
+- A logged-in CodeBuddy / WorkBuddy account. Managing accounts with [workbuddy-switch](https://github.com/changexbc/workbuddy-switch) is optional but is what makes a fresh clone work with zero editing.
+- The MITM capture script (step 2) needs root and binds `:443`; everything else runs unprivileged.
+
 ## Directory layout
 
 ```
 bridge-ai/
-├── README.md          # This file: overview and quick start (CodeBuddy only)
+├── README.md            # this file (English)
+├── README.zh-CN.md      # 简体中文版
+├── config.example.json  # template; config.json is generated from it on first start
+├── src/
+│   ├── index.js          # CLI: server / login / status / scan
+│   ├── server.js         # receiver, key gate, attempt() loop, /admin/* endpoints
+│   ├── proxy.js          # upstream request + SSE first-chunk peek
+│   ├── accounts.js       # pool, runtime counters, sticky rotation
+│   ├── auth-codebuddy.js # token resolution per auth mode
+│   ├── store-wbs.js      # workbuddy-switch store reader + atomic write-back
+│   ├── quota.js          # status → class (quota / auth / retryable / error)
+│   ├── status.js         # /admin/pool payload + CLI table
+│   └── dashboard.html    # self-contained dashboard (no build, no CDN)
+├── scripts/              # svc.mjs (start/stop/restart/status), preview.mjs, capture-*.mjs
 └── docs/
-    ├── RESEARCH.md    # Survey of existing open-source approaches (background)
-    └── DESIGN.md      # Implementation design + minimal viable sketch
+    ├── DESIGN.md         # implementation design + rotation notes
+    ├── request-flow.svg  # request-dispatch flowchart
+    └── RESEARCH.md       # survey of prior art
 ```
 
 ## Glossary
@@ -79,6 +101,23 @@ Adding accounts later needs no config edit either — log in through workbuddy-s
 
 A different config path: `BRIDGE_CONFIG=/path/to/config.json`, or `node src/index.js server --config <path>` (the service script always uses `./config.json`).
 
+### 1b. Service commands
+
+| Command | What it does |
+|---|---|
+| `npm start` | Start detached on `config.listen`; prints the dashboard URL **and the access key**. Says "already running" if the port is taken. |
+| `npm run status` | Probe `/healthz` + `/admin`, print pid, dashboard URL and the current access key. |
+| `npm run stop` | Stop the detached process. |
+| `npm run restart` | Stop + start — this is how you load new code. |
+| `npm run preview` | A throwaway second instance on `127.0.0.1:8789` with its own state under `tmp/preview/`, for trying UI changes without touching the live bridge. Ctrl+C to stop. |
+| `npm run login` | Verify every account can mint an access token. |
+
+On Windows, if the running process was started with administrator rights, a normal shell cannot kill it: `npm run restart` fails with `cannot stop pid=…: access denied` and exits non-zero (it does not report a fake success). Run it from an Administrator terminal.
+
+`npm run status` prints `RUNNING  pid=…  healthz=200  dashboard=200  <url>` plus `access key …`; for the account table use `node src/index.js status` (or `--json` for the raw payload).
+
+
+
 Key fields in `config.json`:
 
 - `listen`: `{ "host": "127.0.0.1", "port": 8787, "serverApiKey": "auto" }`. `"auto"` = generate and persist a key on first start; replace it with a real string to pin one, or set `""` to disable incoming auth entirely (only sane while bound to loopback).
@@ -112,7 +151,7 @@ The script auto-fills `accounts[].auth.refreshToken` and `userId`. After that th
 
 The offline refresh token can become invalid server-side over time (upstream returns `code=12153 "refresh token is invalid"`). To avoid manual intervention, the bridge can re-capture a fresh token on its own when that happens.
 
-- Enabled by `"autoRecapture": true` in `config.json` (default on). Requires the bridge to run as **root** and the `codebuddy` CLI to be logged in on the same machine.
+- Enabled by `"autoRecapture": true` in `config.json` (the code default is on: only `false` disables it). Requires the bridge to run as **root** and the `codebuddy` CLI to be logged in on the same machine. **Leave it off (`false`) when accounts come from the workbuddy-switch store** — see 5c for why.
 - When a refresh fails with `12153`, the bridge briefly runs the same MITM bootstrap as `scripts/capture-token.mjs`: it stops whatever holds `:443` (e.g. nginx), redirects `/etc/hosts`, intercepts one `codebuddy -p` call to grab a fresh `X-Refresh-Token`, writes it into `config.json`, then restores `/etc/hosts` and restarts the stopped service.
 - Safety: serialized (one MITM at a time) with a 10-minute cooldown after a failure, and it fails safe — if re-capture can't run, the original request fails rather than looping forever.
 - Disable with `"autoRecapture": false` if you prefer to re-capture manually.
@@ -141,16 +180,7 @@ export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 
 ### 5b. Account dashboard (who is logged in, and what are they doing)
 
-The dashboard is not a separate service: `src/dashboard.html` is served by the bridge itself, so starting the bridge is what starts the dashboard.
-
-```
-npm start        # run in the background on config.listen (:8787); prints "already running" if the port is taken
-npm run restart  # stop + start, i.e. the way to load new code
-npm run status   # RUNNING pid=… healthz=200 dashboard=200
-npm run preview  # serve a second instance on :8789 without touching the real one (Ctrl+C to stop)
-```
-
-On Windows, if the running process was started with administrator rights, a normal shell cannot kill it: `npm run restart` fails with `cannot stop pid=…: access denied` and exits non-zero (it no longer reports a fake success). Run it from an Administrator terminal.
+The dashboard is not a separate service: `src/dashboard.html` is served by the bridge itself, so starting the bridge is what starts the dashboard. Start/stop/restart commands are in [1b](#1b-service-commands).
 
 While the server runs, open `http://127.0.0.1:8787/admin` (or just `/`). It lists every account in the pool with:
 
@@ -160,13 +190,20 @@ While the server runs, open `http://127.0.0.1:8787/admin` (or just `/`). It list
 - **credentials** — when the refresh token expires and when the in-memory access token expires;
 - **last error** — `quota`, `http 401`, `token: … refresh token is invalid`, etc.
 
+The account that is currently serving traffic is marked `当前` ("current"), and the header shows the rotation mode plus how many times the pointer has moved.
+
 It polls every 3s and is a single self-contained file (`src/dashboard.html`): no build step, no CDN, no external assets.
+
+**Access-key dialog (top-right 访问密钥).** Shows the bridge's own key — the one clients send as `Authorization: Bearer <key>` — in clear text, with *copy*, *randomise* (32 bytes → 64 hex) and *apply*. The new key is written to `config.json` **first** and only then swapped into the running process, so the file and the process can never disagree, and it takes effect **without a restart**; the browser also stores it so its own 3s polling does not 401 itself. A dialog the user opened is never closed by the refresh — auto-polling pauses while any dialog is open.
+
+Endpoints:
 
 - `GET /admin` — the page itself (contains no data, so no key required).
 - `GET /admin/pool` — the same data as JSON. **Free over loopback**, key-gated everywhere else: callers from another machine need `listen.serverApiKey` via `Authorization: Bearer <key>`, `x-api-key: <key>`, or `?key=<key>`.
+- `GET /admin/server-key` — current access key, plus where it lives. `POST /admin/server-key` with `{"key":"…"}` rotates it (16–256 chars of `A-Z a-z 0-9 . _ ~ + / -`). Same gate as `/admin/pool`, so rotating from the LAN requires the **current** key.
 - The page asks for the key once and stores it in `localStorage`; a deep link like `/admin?key=<key>` also works.
 - `node src/index.js status [--json]` prints the same view in the terminal by querying the running server (and says so explicitly when it can't reach it, instead of pretending the pool is idle).
-- Counters live in process memory and reset on restart. Secrets are never exposed — only a masked preview plus expiry timestamps.
+- Counters live in process memory and reset on restart. Account tokens are never exposed — only a masked preview plus expiry timestamps; the access key is the only secret shown in clear, because it exists to be copied.
 
 ### 5c. Sharing the account library with workbuddy-switch
 
@@ -272,14 +309,14 @@ Set `listen.host: "0.0.0.0"` in `config.json` and set an access key:
 The bridge validates the key on every request (except `/healthz`); missing/wrong returns `401`:
 
 ```bash
-curl http://43.130.49.34:8787/v1/chat/completions \
+curl http://<server-ip>:8787/v1/chat/completions \
   -H "Authorization: Bearer your-strong-random-key" \
   -H 'Content-Type: application/json' \
   -d '{"model":"hy4-preview-f","messages":[{"role":"user","content":"hi"}]}'
 # also accepted: -H "x-api-key: your-strong-random-key"
 ```
 
-> **Required**: open inbound TCP `8787` in the Tencent Cloud console **security group** (the host `ufw`/iptables is confirmed not blocking; a timeout when self-connecting via the public IP indicates the security group is not open). Otherwise `http://43.130.49.34:8787/...` is unreachable from outside.
+> **Required**: open inbound TCP `8787` in the Tencent Cloud console **security group** (the host `ufw`/iptables is confirmed not blocking; a timeout when self-connecting via the public IP indicates the security group is not open). Otherwise `http://<server-ip>:8787/...` is unreachable from outside.
 
 For personal, private use only; do not expose publicly or share across multiple users (proxying a subscription quota may conflict with the vendor's Terms of Service).
 
@@ -310,3 +347,18 @@ Two lines per request, tagged with a short request id so concurrent calls stay d
 ```
 
 When enabled, an extra `[fwd] OUT <actual body sent upstream>` line (truncated to 8KB) is logged per request; use `"full"` instead of `true` to log the whole body. There is also `"logIncomingHeaders": true` to record the *names* of the client headers received, and `"dumpBodyDir": "/path"` to write each outgoing body to `<rid>.json` for offline bisection. **Note**: these persist your conversation content to disk — enable only temporarily for debugging, then remove/disable them.
+
+### 9. Secrets: two layers, three files
+
+Two independent credentials are involved, and mixing them up is the most common mistake:
+
+| Credential | Direction | Where it lives | How to rotate |
+|---|---|---|---|
+| **Access key** (`listen.serverApiKey`) | client → bridge | `config.json` (gitignored) | dashboard 访问密钥 dialog, or `POST /admin/server-key` |
+| **Account token** (access + refresh JWT) | bridge → CodeBuddy | the account's own store: `~/.wb-switch/accounts.json` (wbs) or `bridge.state.json` (refresh mode) | workbuddy-switch re-login; `scripts/capture-token.mjs` |
+
+- A rotating access key does **not** touch account tokens, and vice versa.
+- Loopback callers need no access key; network callers do. `/v1/chat/completions` requires it as soon as a key is configured.
+- Everything holding a secret is gitignored — `config.json`, `bridge.state.json`, `README.local.md`. Only `config.example.json` is tracked.
+- Prefer an SSH tunnel over exposing `:8787`; if you do expose it, keep the key long (the generated one is 64 hex) and rotate it if it ever leaks.
+- `logOutgoingBody` / `dumpBodyDir` write conversation content to disk — debugging only, then turn them back off.
