@@ -178,6 +178,20 @@ Point your local harness at it (standard OpenAI protocol; `stream` is forced to 
 export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 ```
 
+### 5a. Model list (`GET /v1/models`)
+
+The upstream CodeBuddy chat API has no model-list endpoint, so the bridge exposes a **static, locally maintained** catalogue in OpenAI-compatible form. The list comes from `provider.models` in `config.json` (strings, or `{id,...}` objects); if omitted it defaults to `["hy4-preview-f","hy4-preview","hy3"]`. The bridge only passes the `model` string through — it never validates it against anything live.
+
+```bash
+curl http://127.0.0.1:8787/v1/models \
+  -H 'Authorization: Bearer <key>'     # loopback is exempt, LAN needs the key
+# -> {"object":"list","data":[{"id":"hy4-preview-f","object":"model","owned_by":"codebuddy",...}, ...]}
+
+curl http://127.0.0.1:8787/v1/models/hy4-preview-f   # single model -> 200, unknown -> 404
+```
+
+Edit `provider.models` / `provider.modelsOwner` in `config.json` to change what clients see.
+
 ### 5b. Account dashboard (who is logged in, and what are they doing)
 
 The dashboard is not a separate service: `src/dashboard.html` is served by the bridge itself, so starting the bridge is what starts the dashboard. Start/stop/restart commands are in [1b](#1b-service-commands).

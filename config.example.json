@@ -29,7 +29,29 @@
     "identity": { "X-Product": "SaaS", "X-Domain": "www.codebuddy.cn" },
     "channelVerifyRetries": 3,
     "sessionMode": "prefix",
-    "timeout": 120000
+    "timeout": 120000,
+    "models": [
+      "hy4-preview",
+      "hy3",
+      "hy3-x",
+      "step-5-preview",
+      "space-bunny",
+      "deepseek-v4.1-flash",
+      "glm-5.3",
+      "glm-5.3-flash",
+      "glm-5.2",
+      "glm-5.1",
+      "glm-5v-turbo",
+      "minimax-m3.1-flash",
+      "minimax-m3",
+      "minimax-m2.7",
+      "kimi-k3.1-pro",
+      "kimi-k3-1",
+      "kimi-k2.8-preview",
+      "deepseek-v4-pro",
+      "mimo-v2.6-pro"
+    ],
+    "modelsOwner": "codebuddy"
   },
   "rotation": {
     "mode": "sticky",

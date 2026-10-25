@@ -80,6 +80,11 @@
   .num { font-variant-numeric: tabular-nums; color: #cdd4e1; }
   .num .e { color: var(--err); }
   .muted { color: var(--dim); }
+  .models { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 16px; }
+  .chip { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border-radius: 999px;
+          font-family: var(--mono); font-size: 12.5px; color: #d4dae6; background: #121821; border: 1px solid var(--line); }
+  .chip .own { color: var(--dim); font-size: 11px; }
+  .chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
   .err-line { color: #f19a9a; font-family: var(--mono); font-size: 11.5px; max-width: 260px;
               overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: bottom; }
 
@@ -172,6 +177,16 @@
         </thead>
         <tbody id="rows"></tbody>
       </table>
+    </div>
+  </div>
+
+  <div class="panel" id="modelsPanel" style="margin-top:18px">
+    <div class="panel-head">
+      <h2>模型列表</h2>
+      <span class="muted" id="modelsMeta" style="font-size:11.5px"></span>
+    </div>
+    <div class="scroll">
+      <div class="models" id="models"></div>
     </div>
   </div>
 
@@ -426,7 +441,8 @@
       ['冷却中', String(t.cooling), t.cooling ? 'var(--warn)' : ''],
       ['请求总数', String(s.requests.total), ''],
       ['失败尝试', String(s.requests.err), s.requests.err ? 'var(--err)' : ''],
-      ['当前并发', String(s.requests.inFlight), '']
+      ['当前并发', String(s.requests.inFlight), ''],
+      ['模型数量', String((d.models || []).length), '']
     ];
     var box = $('cards');
     box.innerHTML = '';
@@ -582,6 +598,31 @@
 
     $('updated').textContent = '更新于 ' + clock(Date.now());
     $('foot').textContent = '自动刷新 ' + (isAuto() ? '3 秒' : '关闭');
+
+    // Models panel — fed by the `models` field of /admin/pool (same static
+    // catalogue as GET /v1/models; the upstream has no model-list endpoint).
+    var mbox = $('models');
+    mbox.innerHTML = '';
+    var mlist = d.models || [];
+    $('modelsMeta').textContent = mlist.length
+      ? ('共 ' + mlist.length + ' 个 · owner: ' + (d.modelOwner || 'codebuddy'))
+      : '';
+    if (!mlist.length) {
+      var mt = document.createElement('span');
+      mt.className = 'muted';
+      mt.textContent = '未配置模型（provider.models 为空）';
+      mbox.appendChild(mt);
+    } else {
+      mlist.forEach(function (id) {
+        var chip = document.createElement('span');
+        chip.className = 'chip';
+        var dot = document.createElement('span'); dot.className = 'dot';
+        var t = document.createElement('span'); t.textContent = id;
+        chip.appendChild(dot);
+        chip.appendChild(t);
+        mbox.appendChild(chip);
+      });
+    }
   }
 
   function isAuto() { return $('auto').checked; }

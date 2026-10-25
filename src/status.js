@@ -66,6 +66,14 @@ export function buildStatus({ config, pool, startedAt, stats, rotation, now = Da
 
   const provider = config.provider || {};
   const listen = config.listen || {};
+  // Static model catalogue (see GET /v1/models in server.js). The upstream has
+  // no model-list endpoint, so this is whatever config.provider.models says,
+  // falling back to the same three defaults the chat path assumes.
+  const rawModels = Array.isArray(provider.models) ? provider.models : null;
+  const models = rawModels && rawModels.length
+    ? rawModels.map((m) => (typeof m === 'string' ? m : (m && (m.id || m.name)) || '')).filter(Boolean)
+    : ['hy4-preview-f', 'hy4-preview', 'hy3'];
+  const modelOwner = (typeof provider.modelsOwner === 'string' && provider.modelsOwner) || 'codebuddy';
   const totals = {
     total: accounts.length,
     available: accounts.filter((a) => !a.cooling && a.state !== 'busy').length,
@@ -107,6 +115,8 @@ export function buildStatus({ config, pool, startedAt, stats, rotation, now = Da
     },
     accounts,
     totals,
+    models,
+    modelOwner,
   };
 }
 

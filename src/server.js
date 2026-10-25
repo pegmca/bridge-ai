@@ -70,6 +70,25 @@ export function createServer({ config, pool, configPath = null, reloadAccounts =
   const authHeader = provider.authHeader || 'Authorization';
   const authScheme = provider.authScheme || 'Bearer';
   const identity = provider.identity || { 'X-Product': 'SaaS', 'X-Domain': 'www.codebuddy.cn' };
+  // Static model catalogue surfaced by GET /v1/models. The upstream CodeBuddy
+  // chat API does not expose a model-list endpoint, so this is a locally
+  // maintained list (config.provider.models); the bridge only passes the model
+  // string through, it never validates it against anything live.
+  const rawModels = Array.isArray(provider.models) ? provider.models : null;
+  const modelList = rawModels && rawModels.length
+    ? rawModels.map((m) => (typeof m === 'string' ? m : m && (m.id || m.name))).filter(Boolean)
+    : ['hy4-preview-f', 'hy4-preview', 'hy3'];
+  const modelOwner = (typeof provider.modelsOwner === 'string' && provider.modelsOwner) || 'codebuddy';
+  function buildModelEntry(id) {
+    return {
+      id,
+      object: 'model',
+      created: Math.floor(Date.now() / 1000),
+      owned_by: modelOwner,
+      root: id,
+      parent: null,
+    };
+  }
   // Official CodeBuddy CLI identity markers. The upstream runs a "channel
   // verification" (error 11128) that intermittently rejects relay requests not
   // sent from the official client; mirroring these headers makes gated/flagged
@@ -698,6 +717,27 @@ export function createServer({ config, pool, configPath = null, reloadAccounts =
     if (!serverAuthOk(req)) {
       res.writeHead(401, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: { message: 'unauthorized: missing or invalid server api key' } }));
+      return;
+    }
+    // OpenAI-compatible model catalogue. GET /v1/models lists every entry;
+    // GET /v1/models/:id returns one (404 if unknown). The list is static
+    // (config.provider.models) — the upstream has no model-list endpoint.
+    if (req.method === 'GET' && pathname === '/v1/models') {
+      sendJson(res, 200, {
+        object: 'list',
+        data: modelList.map((id) => buildModelEntry(id)),
+      });
+      return;
+    }
+    if (req.method === 'GET' && pathname.startsWith('/v1/models/')) {
+      const id = decodeURIComponent(pathname.slice('/v1/models/'.length));
+      const entry = modelList.includes(id) ? buildModelEntry(id) : null;
+      if (!entry) {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: `model '${id}' not found`, type: 'invalid_request_error' } }));
+        return;
+      }
+      sendJson(res, 200, entry);
       return;
     }
     if (req.method === 'POST' && req.url.startsWith('/v1/chat/completions')) {

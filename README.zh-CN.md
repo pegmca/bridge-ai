@@ -178,6 +178,20 @@ node src/index.js server                 # 默认 127.0.0.1:8787
 export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 ```
 
+### 5a. 模型列表（`GET /v1/models`）
+
+上游 CodeBuddy 对话接口本身没有"模型列表"端点，因此 bridge 以 **OpenAI 兼容格式** 暴露一份**本地维护的静态清单**。清单来自 `config.json` 里的 `provider.models`（字符串，或 `{id,...}` 对象）；若不填，默认 `["hy4-preview-f","hy4-preview","hy3"]`。bridge 只透传 `model` 字符串，不会去任何实时源里校验它。
+
+```bash
+curl http://127.0.0.1:8787/v1/models \
+  -H 'Authorization: Bearer <key>'     # loopback 免 key，跨机需要带 key
+# -> {"object":"list","data":[{"id":"hy4-preview-f","object":"model","owned_by":"codebuddy",...}, ...]}
+
+curl http://127.0.0.1:8787/v1/models/hy4-preview-f   # 单个模型 -> 200，未知 -> 404
+```
+
+改 `config.json` 里的 `provider.models` / `provider.modelsOwner` 即可改变客户端看到的清单。
+
 ### 5b. 账号看板（谁在登录、正在干什么）
 
 看板不是独立服务：`src/dashboard.html` 由 bridge 自己提供，所以启动 bridge 就等于启动看板。启停命令见 [1b](#1b-服务命令)。
