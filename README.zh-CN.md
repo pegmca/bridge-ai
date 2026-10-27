@@ -30,6 +30,7 @@ bridge-ai/
 │   ├── index.js          # CLI：server / login / status / scan
 │   ├── server.js         # 接收请求、密钥门禁、attempt() 循环、/admin/* 接口
 │   ├── proxy.js          # 上游请求 + SSE 首帧窥探
+│   ├── usage.js          # SSE usage 旁路嗅探 + JSONL 落盘 + 聚合（见 §9）
 │   ├── accounts.js       # 账号池、运行时计数、sticky 轮转
 │   ├── auth-codebuddy.js # 按 auth.mode 解析 token
 │   ├── store-wbs.js      # 读写 workbuddy-switch 账号库（原子写回）
@@ -200,7 +201,7 @@ curl http://127.0.0.1:8787/v1/models/hy4-preview-f   # 单个模型 -> 200，未
 
 - **身份** —— 该账号实际上游使用的 `userId`（取 `auth.userId`，否则本地解出 refresh token 的 `sub`）；
 - **状态** —— 可用 / 忙（有在途请求）/ 冷却中，并显示剩余冷却时间；
-- **用量** —— 当前并发、总请求数、成功 / 失败、最后使用时间、最后一次 HTTP 状态；
+- **用量** —— 当前并发、总请求数、成功 / 失败、最后使用时间、最后一次 HTTP 状态；其中「总请求数 / 成功 / 失败」是累计计数，已落盘到 `data/stats.json`，**重启不清零**，只有点击看板「重置」或 `POST /admin/usage/reset` 才会清空；
 - **凭证** —— refresh token 何时到期、内存里的 access token 何时到期；
 - **最后错误** —— `quota`、`http 401`、`token: … refresh token is invalid` 等。
 
@@ -221,7 +222,7 @@ curl http://127.0.0.1:8787/v1/models/hy4-preview-f   # 单个模型 -> 200，未
 - `POST /admin/reload` —— 立即重读账号库（见 [5c](#5c-与-workbuddy-switch-共用账号库)）。
 - 页面会问一次密钥并存进 `localStorage`；`/admin?key=<key>` 这样的深链也可以。
 - `node src/index.js status [--json]` 在终端打印同样的视图（连不上会明确说明，而不是假装账号都空闲）。
-- 计数只在内存里，重启清零。账号 token 从不外露——只有掩码和到期时间；明文展示的只有访问密钥，因为它本来就是拿来复制的。
+- 累计请求计数（`total` / `ok` / `err`）落盘到 `data/stats.json`（节流写 + 每 5s + 退出时），启动回填，**重启不清零**；`inFlight` 与运行时长仍按实例重置。清空它们的唯一入口是 `POST /admin/usage/reset`。账号 token 从不外露——只有掩码和到期时间；明文展示的只有访问密钥，因为它本来就是拿来复制的。
 
 ### 5c. 与 workbuddy-switch 共用账号库
 
@@ -366,7 +367,22 @@ ssh tx "grep '\[fwd\]' /opt/bridge-ai/bridge.log"   # 只看转发记录
 
 打开后每个请求会多一行 `[fwd] OUT <实际发给上游的 body>`（截断 8KB）；写 `"full"` 可输出完整 body。另有 `"logIncomingHeaders": true` 记录收到的客户端头**名称**，`"dumpBodyDir": "/path"` 把每个出站 body 写成 `<rid>.json` 便于离线排查。**注意**：这些会把你的对话内容落盘——只在调试时临时打开，之后务必关掉。
 
-### 9. 密钥：两层、三个文件
+### 9. token 用量监控
+
+bridge 会在每条流式响应最后的 `usage` 事件里读出 token 用量——**不改**客户端收到的字节——并把每条请求追加写到按天分割的 JSONL 文件（`config.usage.dir`，默认 `data/usage/usage-YYYY-MM-DD.jsonl`，已 gitignore，保留 `usage.retainDays` 天，默认 90）。整段 `usage` 原样落盘，规范数字在读取时再派生，所以上游以后改名/加字段也不会让聚合失效。
+
+能区分的种类（已用真实 `hy4-preview-f` 响应验证）：输入 token 与输出 token，输入内部再按缓存**命中 / 未命中 / 写入**拆分；输出侧还能拆出**思考（reasoning）token**（`completion_tokens_details.reasoning_tokens`）。真正的计费单位是 `credit` 而不是 token，所以接口仍会返回 `credit`；但看板面板只画 token——上游有些构建把 `credit` 一律回 0，展示它没有意义。
+
+- `GET /admin/usage` —— **累加总量**：`credit`、总 token、思考 token、请求数、未结算、缓存命中率，以及 `since`（最早一条记录的时间 = 统计开始时间）。默认就是全量；`?range=N` 可临时收窄到最近 N 天。另附按天 / 按账号 / 按模型的拆分供脚本使用。门禁与 `/admin/pool` 相同（loopback 免密钥，跨机要带 key）。
+- `POST /admin/usage/reset` —— **清空**所有用量统计：同时清掉内存聚合、磁盘 JSONL 与「统计开始时间」（可选 body `{"days":N}` 只删最近 N 天）。这是唯一会清空数据的入口，**重启不会清空**。
+- 看板：页面**最底部**一块**用量**面板——三个数字（总 token、请求数、缓存命中率）+ 一张横向柱图，把 token 拆成「输入 · 命中缓存 / 未命中 / 写入缓存」和「输出 · 思考 / 内容」并标出占比；不按时间切分、不区分账号，标题右侧只显示「统计开始于 …」和「重置」按钮（带二次确认），随页面一起 3 秒轮询。
+- 日志：每个请求打印一行 `[fwd] USAGE [<rid>] …`，所以 `grep USAGE bridge.log` 不需要看板也能看。
+
+**持久化与重启**：JSONL 落盘目录按**项目根目录**解析为绝对路径（`data/usage/`），所以无论 bridge 从哪个工作目录拉起（提权 / 守护进程常见），写和读都在同一处；启动时按 `usage.retainDays`（默认 90 天）整段回填内存聚合，所以总量是累计值，**重启后（含请求总数）自动恢复，不会清零**。只有显式调用重置才会清空并重新计时。
+
+`usage.enabled: false` 完全关闭记录；该接口仍会返回磁盘上已有的历史。「未结算」统计的是已经响应、但上游在客户端断开前没发回 `usage` 的请求——不会当成 0 计入。
+
+### 10. 密钥：两层、三个文件
 
 涉及两套互不相干的凭证，把它们搞混是最常见的错误：
 

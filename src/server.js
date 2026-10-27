@@ -19,6 +19,7 @@ import { resolveToken, refreshToken } from './auth-codebuddy.js';
 import { forwardRequest, UpstreamHttpError, UpstreamStreamError } from './proxy.js';
 import { classifyStatus } from './quota.js';
 import { buildStatus } from './status.js';
+import { createUsageRecorder, attachUsageTap, derive } from './usage.js';
 import { redact } from './util.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -220,6 +221,52 @@ export function createServer({ config, pool, configPath = null, reloadAccounts =
   const startedAt = Date.now();
   const stats = { total: 0, ok: 0, err: 0, inFlight: 0 };
 
+  // Lifetime request counters (total/ok/err) persist across restarts so they are
+  // NOT zeroed on restart — only an explicit reset wipes them. `inFlight` and
+  // `startedAt` stay per-instance (live concurrency / uptime).
+  const STATS_FILE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'stats.json');
+  let lastStatsFlush = 0;
+  function flushStats() {
+    const now = Date.now();
+    if (now - lastStatsFlush < 2000) return; // throttle: at most one write / 2s
+    lastStatsFlush = now;
+    try {
+      fs.mkdirSync(path.dirname(STATS_FILE), { recursive: true });
+      fs.writeFileSync(STATS_FILE, JSON.stringify({ total: stats.total, ok: stats.ok, err: stats.err }));
+    } catch {}
+  }
+  function loadStats() {
+    try {
+      const d = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
+      if (Number.isFinite(d.total)) stats.total = d.total;
+      if (Number.isFinite(d.ok)) stats.ok = d.ok;
+      if (Number.isFinite(d.err)) stats.err = d.err;
+    } catch {}
+  }
+  loadStats();
+  const statsTimer = setInterval(flushStats, 5000);
+  if (statsTimer.unref) statsTimer.unref();
+  process.on('exit', () => {
+    try {
+      fs.mkdirSync(path.dirname(STATS_FILE), { recursive: true });
+      fs.writeFileSync(STATS_FILE, JSON.stringify({ total: stats.total, ok: stats.ok, err: stats.err }));
+    } catch {}
+  });
+
+  // Token / credit usage accounting. Reads the upstream `usage` event off every
+  // response stream, appends a JSONL line per request, and keeps rolling
+  // aggregates for the dashboard. Disabled via config.usage.enabled === false.
+  const usageCfg = config.usage || {};
+  const usageRec = createUsageRecorder({
+    dir: usageCfg.dir || './data/usage',
+    retainDays: usageCfg.retainDays || 90,
+    enabled: usageCfg.enabled !== false,
+  });
+  // Load the whole retention window (not just 30 days): the dashboard shows
+  // lifetime totals only, so a partial backfill would understate them.
+  usageRec.loadHistory(usageCfg.retainDays || 90);
+  usageRec.prune();
+
   function queryParam(url, name) {
     try {
       return new URL(url, 'http://placeholder').searchParams.get(name);
@@ -335,6 +382,7 @@ export function createServer({ config, pool, configPath = null, reloadAccounts =
 
   async function handleChat(req, res) {
     stats.total += 1;
+    flushStats();
     stats.inFlight += 1;
     res.on('close', () => {
       stats.inFlight = Math.max(0, stats.inFlight - 1);
@@ -425,6 +473,7 @@ export function createServer({ config, pool, configPath = null, reloadAccounts =
         endCall(account, opts);
         if (opts.ok) stats.ok += 1;
         else stats.err += 1;
+        flushStats();
       };
 
       let tokenReady = false;
@@ -487,6 +536,8 @@ export function createServer({ config, pool, configPath = null, reloadAccounts =
               settle({ status: r.status, ok: true });
               clearError(account);
               console.log(`[fwd] OK  [${rid}] account=${account.name} host=${host} status=${r.status} ${Date.now() - t0}ms`);
+              r.servedAccount = account.name;
+              r.servedModel = parsed.model;
               return r;
             } catch (e) {
               lastErr = e;
@@ -564,17 +615,54 @@ export function createServer({ config, pool, configPath = null, reloadAccounts =
     try {
       const r = await attempt(new Set());
       const outHeaders = filterOutHeaders(r.headers);
+      const recordUsage = (account, model, status, t0ms, usage) => {
+        const d = derive(usage);
+        console.log(
+          `[fwd] USAGE [${rid}] account=${account} model=${model} ` +
+            `in=${d ? d.prompt : '?'} out=${d ? d.completion : '?'} ` +
+            `hit=${d ? d.hit : '?'} miss=${d ? d.miss : '?'} think=${d ? d.reasoning : '?'} credit=${d ? d.credit : '?'}`
+        );
+        usageRec.record({
+          ts: Date.now(),
+          rid,
+          account: account || 'unknown',
+          model: model || 'unknown',
+          status: status || null,
+          ms: Date.now() - t0ms,
+          usage: usage || null,
+        });
+      };
+
       if (!stream || !r.streaming) {
         res.writeHead(r.status, outHeaders);
         res.end(r.body || Buffer.alloc(0));
+        let u = null;
+        if (r.body) {
+          try {
+            const o = JSON.parse(r.body.toString('utf8'));
+            if (o && o.usage) u = o.usage;
+          } catch {}
+        }
+        recordUsage(r.servedAccount, r.servedModel, r.status, t0, u);
       } else {
         res.writeHead(r.status, outHeaders);
+        const cap = { usage: null };
+        attachUsageTap(r.stream, cap);
         r.stream.pipe(res);
         r.stream.on('error', () => {
           try {
             res.end();
           } catch {}
         });
+        let done = false;
+        const finalize = () => {
+          if (done) return;
+          done = true;
+          recordUsage(r.servedAccount, r.servedModel, r.status, t0, cap.usage);
+        };
+        r.stream.on('end', finalize);
+        res.on('close', finalize);
+        res.on('finish', finalize);
       }
     } catch (e) {
       console.log(`[fwd] ERR [${rid}] ${Date.now() - t0}ms ${e.message}`);
@@ -663,6 +751,43 @@ export function createServer({ config, pool, configPath = null, reloadAccounts =
         return;
       }
       sendJson(res, 200, buildStatus({ config, pool, startedAt, stats, rotation }));
+      return;
+    }
+    // Token / credit usage aggregate. Default is all-time totals (`range=all`);
+    // `range=N` still narrows to the last N days for ad-hoc queries. Same
+    // read-only gate as the pool view: free over loopback, key-gated on the LAN.
+    if (req.method === 'GET' && pathname === '/admin/usage') {
+      if (!isLoopback(req) && !serverAuthOk(req)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'unauthorized: missing or invalid server api key' } }));
+        return;
+      }
+      const raw = String(queryParam(req.url, 'range') || 'all').toLowerCase();
+      let rDays = raw === 'all' || raw === '0' ? 0 : parseInt(raw, 10);
+      if (!Number.isFinite(rDays) || rDays < 0) rDays = 0;
+      if (rDays > 90) rDays = 90;
+      sendJson(res, 200, usageRec.snapshot(rDays));
+      return;
+    }
+    // Explicit reset of usage statistics. Wipes the in-memory aggregates AND the
+    // on-disk JSONL — the only thing that clears data. Restart never does this;
+    // stats are backfilled from JSONL on startup. Optional ?days=N keeps only
+    // data outside the trailing N-day window (deletes the last N days).
+    if (req.method === 'POST' && pathname === '/admin/usage/reset') {
+      if (!isLoopback(req) && !serverAuthOk(req)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'unauthorized: missing or invalid server api key' } }));
+        return;
+      }
+      const dv = parseInt(queryParam(req.url, 'days') || '', 10);
+      const days = Number.isFinite(dv) && dv > 0 ? dv : null;
+      const r = usageRec.reset(days ? { days } : {});
+      // Also wipe the lifetime request counters — they persist across restarts
+      // and are only cleared here, never on startup.
+      stats.total = 0; stats.ok = 0; stats.err = 0;
+      flushStats();
+      console.log(`[usage] reset: deleted ${r.deleted} file(s)` + (days ? ` (last ${days}d)` : '') + '; lifetime counters cleared');
+      sendJson(res, 200, { ok: true, deleted: r.deleted, countersCleared: true });
       return;
     }
     // The bridge's own access key (Authorization: Bearer <key>). Same gate as

@@ -6,6 +6,11 @@
   },
   "logOutgoingBody": false,
   "logIncomingHeaders": false,
+  "usage": {
+    "enabled": true,
+    "dir": "./data/usage",
+    "retainDays": 90
+  },
   "sanitize": {
     "enabled": false,
     "rules": [

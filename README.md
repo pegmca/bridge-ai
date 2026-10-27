@@ -30,6 +30,7 @@ bridge-ai/
 │   ├── index.js          # CLI: server / login / status / scan
 │   ├── server.js         # receiver, key gate, attempt() loop, /admin/* endpoints
 │   ├── proxy.js          # upstream request + SSE first-chunk peek
+│   ├── usage.js          # SSE usage tap + JSONL persistence + aggregates (§9)
 │   ├── accounts.js       # pool, runtime counters, sticky rotation
 │   ├── auth-codebuddy.js # token resolution per auth mode
 │   ├── store-wbs.js      # workbuddy-switch store reader + atomic write-back
@@ -221,7 +222,7 @@ Endpoints:
 - `POST /admin/reload` — re-read the account store immediately (see [5c](#5c-sharing-the-account-library-with-workbuddy-switch)).
 - The page asks for the key once and stores it in `localStorage`; a deep link like `/admin?key=<key>` also works.
 - `node src/index.js status [--json]` prints the same view in the terminal by querying the running server (and says so explicitly when it can't reach it, instead of pretending the pool is idle).
-- Counters live in process memory and reset on restart. Account tokens are never exposed — only a masked preview plus expiry timestamps; the access key is the only secret shown in clear, because it exists to be copied.
+- Lifetime request counters (`total` / `ok` / `err`) persist across restarts: they are written to `data/stats.json` (throttled + every 5s + on exit) and backfilled on startup, so a restart never zeroes them. `inFlight` and uptime (`startedAt`) stay per-instance. The only thing that clears them is `POST /admin/usage/reset`. Account tokens are never exposed — only a masked preview plus expiry timestamps; the access key is the only secret shown in clear, because it exists to be copied.
 
 ### 5c. Sharing the account library with workbuddy-switch
 
@@ -366,7 +367,56 @@ Two lines per request, tagged with a short request id so concurrent calls stay d
 
 When enabled, an extra `[fwd] OUT <actual body sent upstream>` line (truncated to 8KB) is logged per request; use `"full"` instead of `true` to log the whole body. There is also `"logIncomingHeaders": true` to record the *names* of the client headers received, and `"dumpBodyDir": "/path"` to write each outgoing body to `<rid>.json` for offline bisection. **Note**: these persist your conversation content to disk — enable only temporarily for debugging, then remove/disable them.
 
-### 9. Secrets: two layers, three files
+### 9. Token usage monitoring
+
+The bridge reads the upstream `usage` object off the final SSE event of every
+stream — without altering the bytes the client receives — and records one line
+per request to a date-partitioned JSONL file under `config.usage.dir`
+(`data/usage/usage-YYYY-MM-DD.jsonl`, gitignored, retained `usage.retainDays`,
+default 90). The whole `usage` object is stored verbatim; canonical numbers are
+derived at read time so a future upstream rename cannot break aggregation.
+
+What it distinguishes (verified against a live `hy4-preview-f` response): input
+vs output tokens, and within the input — cache **hit / miss / write**; the output
+side splits into **reasoning ("thinking") tokens** via
+`completion_tokens_details.reasoning_tokens`. The real billing unit is `credit`,
+not tokens, so the API still returns it — the dashboard panel itself only plots
+tokens, because `credit` comes back as 0 on some upstream builds.
+
+- `GET /admin/usage` — **cumulative totals**: `credit`, total tokens, reasoning
+  tokens, requests, unsettled, cache hit rate, plus `since` (timestamp of the
+  oldest record, i.e. when counting started). All-time by default; `?range=N`
+  narrows to the last N days. Per-day / per-account / per-model breakdowns are
+  still included for scripting. Same read-only gate as `/admin/pool` (free over
+  loopback, key-gated on the LAN).
+- `POST /admin/usage/reset` — **wipe** all usage statistics: clears the in-memory
+  aggregates, the on-disk JSONL and the "counting started" timestamp (optional
+  body `{"days":N}` deletes only the last N days). This is the only thing that
+  clears data — **restart does not**.
+- Dashboard: a **用量** panel at the very **bottom** of `/admin` — three figures
+  (total tokens, requests, cache hit rate) plus one horizontal bar chart that
+  breaks the tokens into input (cache hit / miss / write) and output (reasoning /
+  visible text) with each share of the total. Not split by day or by account; the
+  header shows only "统计开始于 …" and a "重置" button (confirm dialog); polls with
+  the rest of the page.
+- Log: a `[fwd] USAGE [<rid>] …` line per request, so `grep USAGE bridge.log`
+  works without the dashboard.
+
+**Persistence across restart**: the JSONL directory is resolved to an absolute
+path against the project root (`data/usage/`), so writes and the startup
+backfill always land in the same place regardless of the process working
+directory (the bridge often runs elevated / as a service with a different cwd).
+On startup `loadHistory(usage.retainDays)` (default 90) re-reads the JSONL into
+memory, so the totals are genuinely cumulative and — including the request total —
+survive a restart and are never zeroed by it. Only an explicit reset clears them
+and restarts the clock.
+
+`usage.enabled: false` disables recording entirely; the endpoint still returns
+whatever history is on disk. "Unsettled" counts requests that were served but
+whose stream ended (client disconnect) before the upstream emitted a `usage`
+event — they are not silently counted as zero.
+
+### 10. Secrets: two layers, three files
 
 Two independent credentials are involved, and mixing them up is the most common mistake:
 

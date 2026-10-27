@@ -88,6 +88,26 @@
   .err-line { color: #f19a9a; font-family: var(--mono); font-size: 11.5px; max-width: 260px;
               overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: bottom; }
 
+  /* Usage panel: flat stat strip + horizontal composition bars. */
+  .usage-body { padding: 16px; }
+  .usage-stats { display: flex; flex-wrap: wrap; gap: 30px; margin-bottom: 18px; }
+  .usage-stats .k { display: block; color: var(--muted); font-size: 11.5px; letter-spacing: .3px; }
+  .usage-stats .v { display: block; font-size: 21px; font-weight: 500; margin-top: 2px;
+                    font-variant-numeric: tabular-nums; }
+  .usage-stats .v small { font-size: 11.5px; color: var(--dim); font-weight: 400; margin-left: 3px; }
+  .hrow { display: grid; grid-template-columns: 128px 1fr 104px 58px; align-items: center;
+          gap: 12px; margin-bottom: 9px; font-size: 12.5px; }
+  .hrow .hl { color: #c3cad8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hrow .track { height: 13px; background: #0f141b; border: 1px solid #1c222c; border-radius: 4px; overflow: hidden; }
+  .hrow .fill { height: 100%; border-radius: 3px; transition: width .25s ease; }
+  .hrow .hv { text-align: right; font-variant-numeric: tabular-nums; color: #cdd4e1; }
+  .hrow .hp { text-align: right; font-variant-numeric: tabular-nums; color: var(--dim); }
+  .hrow.zero .hl, .hrow.zero .hv, .hrow.zero .hp { color: var(--dim); }
+  @media (max-width: 560px) {
+    .hrow { grid-template-columns: 96px 1fr 78px; }
+    .hrow .hp { display: none; }
+  }
+
   .notice { margin-top: 14px; padding: 10px 14px; border-radius: 9px; font-size: 12.5px;
             border: 1px solid #4a3a1a; background: #241d10; color: #e5c483; }
   .notice.err { border-color: #4d2222; background: #241314; color: #f0a0a0; }
@@ -183,10 +203,27 @@
   <div class="panel" id="modelsPanel" style="margin-top:18px">
     <div class="panel-head">
       <h2>模型列表</h2>
-      <span class="muted" id="modelsMeta" style="font-size:11.5px"></span>
     </div>
     <div class="scroll">
       <div class="models" id="models"></div>
+    </div>
+  </div>
+
+  <div class="panel" id="usagePanel" style="margin-top:18px; display:none">
+    <div class="panel-head">
+      <h2>用量 · token</h2>
+      <span class="muted">
+        <span id="usageSince" style="font-size:11.5px"></span>
+        <button id="usageReset" type="button" class="linkbtn" style="margin-left:10px;color:#e06c75">重置</button>
+      </span>
+    </div>
+    <div class="usage-body">
+      <div class="usage-stats">
+        <div><span class="k">总 token</span><span class="v" id="uTotal">0</span></div>
+        <div><span class="k">请求数</span><span class="v" id="uReq">0</span></div>
+        <div><span class="k">缓存命中率</span><span class="v" id="uHit">—</span></div>
+      </div>
+      <div id="usageBars"></div>
     </div>
   </div>
 
@@ -196,7 +233,7 @@
 
   <footer>
     <span class="left">
-      <span>GET /admin/pool 提供同样的 JSON；数据来自进程内存，重启即清零。</span>
+      <span>GET /admin/pool 提供同样的 JSON；累计计数落盘，重启不清零。</span>
       <button type="button" class="linkbtn" id="setKey">解锁此浏览器</button>
     </span>
     <span id="foot"></span>
@@ -441,8 +478,7 @@
       ['冷却中', String(t.cooling), t.cooling ? 'var(--warn)' : ''],
       ['请求总数', String(s.requests.total), ''],
       ['失败尝试', String(s.requests.err), s.requests.err ? 'var(--err)' : ''],
-      ['当前并发', String(s.requests.inFlight), ''],
-      ['模型数量', String((d.models || []).length), '']
+      ['当前并发', String(s.requests.inFlight), '']
     ];
     var box = $('cards');
     box.innerHTML = '';
@@ -604,9 +640,6 @@
     var mbox = $('models');
     mbox.innerHTML = '';
     var mlist = d.models || [];
-    $('modelsMeta').textContent = mlist.length
-      ? ('共 ' + mlist.length + ' 个 · owner: ' + (d.modelOwner || 'codebuddy'))
-      : '';
     if (!mlist.length) {
       var mt = document.createElement('span');
       mt.className = 'muted';
@@ -656,11 +689,123 @@
         // opened stays put no matter how many refreshes happen behind it.
         if (gateState() === 'unlock' && state.gateAuto) closeGate();
         render(d);
+        loadUsage();
       })
       .catch(function (e) {
         if (e.message === 'unauthorized') return;
         $('serverLine').textContent = '无法读取状态：' + e.message;
       });
+  }
+
+  function fmtInt(n) { return typeof n === 'number' ? n.toLocaleString('en-US') : '0'; }
+  function fmtPct(x) { return x == null ? '—' : (x * 100).toFixed(1) + '%'; }
+  function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+  function fmtTime(ts) {
+    var d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) +
+      ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+
+  // Token / credit usage panel — fed by GET /admin/usage (all-time totals).
+  function loadUsage() {
+    fetch('/admin/usage?range=all', { headers: authHeaders(), cache: 'no-store' })
+      .then(function (r) {
+        if (r.status === 401) return null; // unlock gate is handled by load()
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (d) {
+        if (!d || d.error) return;
+        $('usagePanel').style.display = '';
+        renderUsage(d);
+      })
+      .catch(function () {});
+  }
+
+  // The only breakdown we show: where the tokens went. Input splits by cache
+  // state (cheap vs full price), output splits into reasoning vs visible text.
+  function usageParts(t) {
+    var prompt = t.prompt || 0, completion = t.completion || 0;
+    var hit = t.hit || 0, miss = t.miss || 0, write = t.write || 0;
+    var reason = Math.min(t.reasoning || 0, completion);
+    return [
+      { label: '输入 · 命中缓存', v: hit, c: '#35c98a' },
+      { label: '输入 · 未命中', v: miss, c: '#4b8bf5' },
+      { label: '输入 · 写入缓存', v: write, c: '#a78bfa' },
+      // Only shown when prompt_tokens exceeds the three cache buckets summed,
+      // which happens if upstream changes how it accounts for input.
+      { label: '输入 · 未归类', v: Math.max(0, prompt - hit - miss - write), c: '#5f6779', onlyIfPositive: true },
+      { label: '输出 · 思考', v: reason, c: '#e0a83c' },
+      { label: '输出 · 内容', v: Math.max(0, completion - reason), c: '#5ac8d8' }
+    ];
+  }
+
+  function renderUsage(d) {
+    var t = d.total || {};
+    var totalTokens = (t.prompt || 0) + (t.completion || 0);
+    $('uTotal').innerHTML = fmtInt(totalTokens) + '<small>token</small>';
+    $('uReq').textContent = fmtInt(t.requests);
+    $('uHit').textContent = fmtPct(t.hitRate);
+
+    var since = d.since ? fmtTime(d.since) : null;
+    $('usageSince').textContent = since ? '统计开始于 ' + since : '尚无记录';
+
+    var host = $('usageBars');
+    host.innerHTML = '';
+    var parts = usageParts(t);
+    var max = 0;
+    parts.forEach(function (p) { if (p.v > max) max = p.v; });
+    if (max <= 0) {
+      var empty = document.createElement('div');
+      empty.className = 'muted';
+      empty.style.cssText = 'padding:4px 0 12px;font-size:12.5px';
+      empty.textContent = '还没有 token 记录。';
+      host.appendChild(empty);
+    } else {
+      parts.forEach(function (p) {
+        if (p.onlyIfPositive && !p.v) return;
+        var row = document.createElement('div');
+        row.className = 'hrow' + (p.v ? '' : ' zero');
+        var l = document.createElement('div');
+        l.className = 'hl'; l.textContent = p.label;
+        var track = document.createElement('div');
+        track.className = 'track';
+        var fill = document.createElement('div');
+        fill.className = 'fill';
+        fill.style.width = (p.v / max * 100).toFixed(2) + '%';
+        fill.style.background = p.c;
+        track.appendChild(fill);
+        var val = document.createElement('div');
+        val.className = 'hv'; val.textContent = fmtInt(p.v);
+        var pct = document.createElement('div');
+        pct.className = 'hp';
+        pct.textContent = totalTokens > 0 ? (p.v / totalTokens * 100).toFixed(1) + '%' : '—';
+        row.appendChild(l); row.appendChild(track);
+        row.appendChild(val); row.appendChild(pct);
+        host.appendChild(row);
+      });
+    }
+  }
+
+  // Explicit wipe of all usage statistics. Restart never clears data; this is
+  // the only entry point, and it requires a confirming dialog.
+  function resetUsage() {
+    if (!window.confirm(
+      '确定要清空所有统计吗？\n会同时删除内存与磁盘记录（用量 JSONL + 累计请求计数 total/ok/err），统计开始时间会重新计时，此操作不可恢复；重启不会清空，只有此操作会。'
+    )) return;
+    fetch('/admin/usage/reset', {
+      method: 'POST',
+      headers: Object.assign({ 'content-type': 'application/json' }, authHeaders()),
+      body: '{}',
+      cache: 'no-store'
+    })
+      .then(asJson)
+      .then(function (o) {
+        if (o && o.ok) { toast('已清空用量统计（' + (o.deleted || 0) + ' 个文件）'); loadUsage(); }
+        else toast('重置失败', true);
+      })
+      .catch(function (e) { toast('重置失败：' + e.message, true); });
   }
 
   // Transient confirmation strip. The 3s refresh cannot show feedback for a
@@ -715,6 +860,7 @@
   }
 
   $('refresh').addEventListener('click', load);  $('auto').addEventListener('change', schedule);
+  $('usageReset').addEventListener('click', resetUsage);
   $('keyBtn').addEventListener('click', openKeyDialog);
   $('setKey').addEventListener('click', function () { openUnlockGate('输入新的 serverApiKey', false); });
   $('gateCancel').addEventListener('click', closeGate);
