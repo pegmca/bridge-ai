@@ -21,3 +21,6 @@ README.local.md
 
 # usage accounting data (date-partitioned JSONL; regenerated from live traffic)
 data/
+
+
+.workbuddy/

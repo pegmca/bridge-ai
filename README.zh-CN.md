@@ -209,6 +209,8 @@ curl http://127.0.0.1:8787/v1/models/hy4-preview-f   # 单个模型 -> 200，未
 
 **手动指定当前账号。** 其余每一行都有「设为当前」按钮：点了就把 sticky 指针移到那个账号，下一个请求直接打到它，不必等它出错才轮转。两个细节值得知道：这一下也会**解除该账号的冷却**（否则指针会停在一个每次请求都被跳过的账号上——真要发生时页面会先确认），以及它**不会锁死**账号：该账号出现账号级错误后，轮转照常从它后面继续。`rotation.mode` 为 `lru` 时按钮是禁用的，因为那种模式每个请求都重新挑号，没有指针可移。
 
+**一键解锁。** 凡是处于 `cooling`（冷却中）状态的行，都会在「设为当前」旁边多出一个「解锁」按钮。点一下立刻清除该账号的冷却（重置 `exhaustedUntil` 和连续失败计数），但**不会**移动轮转指针——适合你确认某个 `429`/额度冷却其实已经过去时使用。一次点击、无需确认，调用的是 `POST /admin/unlock`（门禁与 `/admin/current` 一致）。若上游额度其实仍耗尽，下一次请求会再次把它冷却。
+
 页面每 3 秒轮询一次，整个看板就是一个 `src/dashboard.html`：不用构建、不引 CDN、无外部资源。
 
 **访问密钥弹窗（右上角「访问密钥」）** 显示的是**本服务自己的 key**（客户端 `Authorization: Bearer <key>` 里那串），可明文查看、复制、随机生成（32 字节 → 64 位 hex）并保存。新 key 会**先写入 `config.json`，写盘成功后才替换进程内存里的值**，所以文件和进程永远不会不一致，**改完立即生效、不用重启**；浏览器也会自动换用新 key，否则下一轮 3 秒轮询会把自己挡成 401。用户自己打开的弹窗不会被自动刷新关掉——有弹窗时轮询整体暂停。
@@ -219,6 +221,7 @@ curl http://127.0.0.1:8787/v1/models/hy4-preview-f   # 单个模型 -> 200，未
 - `GET /admin/pool` —— 同样的数据，JSON 形式。**本机 loopback 免密钥**，其它来源都要密钥：别处调用需带 `listen.serverApiKey`，支持 `Authorization: Bearer <key>`、`x-api-key: <key>` 或 `?key=<key>`。
 - `GET /admin/server-key` —— 当前访问密钥及其位置；`POST /admin/server-key`，body `{"key":"…"}` 可更换（16–256 位，字符集 `A-Z a-z 0-9 . _ ~ + / -`）。门禁与 `/admin/pool` 相同，因此**从局域网更换必须带当前 key**。
 - `POST /admin/current`，body `{"index": 3}` —— 把轮转指针固定到 `pool[3]`（「设为当前」按钮调的就是它）。成功返回 `{"ok":true,"index":3,"name":"…","clearedCooldown":false}`；索引非法 `400`，`rotation.mode` 为 `lru` 时 `409`。它改变运行行为，所以门禁与换 key 一致。
+- `POST /admin/unlock`，body `{"index": 3}` —— 解除 `pool[3]` 的冷却、回到可用池，**但不移动**轮转指针（「解锁 / 一键解锁」按钮调的就是它）。成功返回 `{"ok":true,"index":3,"name":"…","wasCooling":true}`；索引非法 `400`。门禁与 `/admin/current` 一致。
 - `POST /admin/reload` —— 立即重读账号库（见 [5c](#5c-与-workbuddy-switch-共用账号库)）。
 - 页面会问一次密钥并存进 `localStorage`；`/admin?key=<key>` 这样的深链也可以。
 - `node src/index.js status [--json]` 在终端打印同样的视图（连不上会明确说明，而不是假装账号都空闲）。

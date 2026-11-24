@@ -725,6 +725,40 @@ export function createServer({ config, pool, configPath = null, reloadAccounts =
     });
   }
 
+  // POST /admin/unlock {"index": n} — lift one account's cooldown back to
+  // available *without* moving the rotation pointer. This is the server side of
+  // the dashboard's "一键解锁" button: distinct from pinning (which also changes
+  // the current account), it only clears the cooldown. Same gate as /admin/current:
+  // loopback is free, the network needs the current key.
+  async function handleUnlock(req, res) {
+    let body = null;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      body = null;
+    }
+    const i = body ? Number(body.index) : NaN;
+    if (!Number.isInteger(i) || i < 0 || i >= pool.length) {
+      return sendJson(res, 400, {
+        error: { message: `index must be an integer in 0..${Math.max(0, pool.length - 1)}` },
+      });
+    }
+    const account = pool[i];
+    const wasCooling = Date.now() < account.exhaustedUntil;
+    account.exhaustedUntil = 0;
+    account.consecutiveFails = 0;
+    console.log(
+      `[bridge] account "${account.name}" (index ${i}) cooldown cleared from the dashboard` +
+        (wasCooling ? '' : ' (was not cooling)')
+    );
+    return sendJson(res, 200, {
+      ok: true,
+      index: i,
+      name: account.name,
+      wasCooling,
+    });
+  }
+
   const handler = (req, res) => {
     if (req.url === '/healthz') {
       res.writeHead(200, { 'content-type': 'text/plain' });
@@ -835,6 +869,19 @@ export function createServer({ config, pool, configPath = null, reloadAccounts =
         return;
       }
       handleSetCurrent(req, res).catch((e) => {
+        if (!res.headersSent) sendJson(res, 500, { error: { message: String((e && e.message) || e) } });
+      });
+      return;
+    }
+    // The "一键解锁" button: clear a single account's cooldown on demand. Pure
+    // state change, so the same gate as pinning the current account.
+    if (req.method === 'POST' && pathname === '/admin/unlock') {
+      if (!isLoopback(req) && !serverAuthOk(req)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'unauthorized: missing or invalid server api key' } }));
+        return;
+      }
+      handleUnlock(req, res).catch((e) => {
         if (!res.headersSent) sendJson(res, 500, { error: { message: String((e && e.message) || e) } });
       });
       return;

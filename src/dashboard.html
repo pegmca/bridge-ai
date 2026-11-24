@@ -116,6 +116,8 @@
   button.pin { padding: 3px 9px; font-size: 11.5px; border-radius: 6px; color: var(--muted); }
   button.pin:hover:not(:disabled) { color: #cfe0ff; border-color: #2f4f86; }
   button.pin:disabled { opacity: .45; cursor: default; }
+  button.pin.unlock { color: #e0a83c; border-color: #4a3a1a; }
+  button.pin.unlock:hover:not(:disabled) { color: #f0c069; border-color: #6b5226; }
   .using { font-size: 11.5px; color: #a8c6ff; }
 
   .toast {
@@ -583,13 +585,20 @@
       tr.appendChild(errTd);
 
       // Manual pick: sticky mode keeps a pointer between requests, so the
-      // dashboard can move it. In lru mode there is no pointer to move.
+      // dashboard can move it. In lru mode there is no pointer to move. The
+      // "一键解锁" button (only shown for cooled accounts) lifts the cooldown
+      // back to available without touching the rotation pointer.
       var actTd = document.createElement('td');
+      var actWrap = document.createElement('span');
+      actWrap.style.display = 'inline-flex';
+      actWrap.style.alignItems = 'center';
+      actWrap.style.gap = '6px';
+
       if (a.current) {
         var usingEl = document.createElement('span');
         usingEl.className = 'using';
         usingEl.textContent = '正在使用';
-        actTd.appendChild(usingEl);
+        actWrap.appendChild(usingEl);
       } else {
         var pinBtn = document.createElement('button');
         pinBtn.type = 'button';
@@ -602,8 +611,19 @@
           pinBtn.disabled = true;
           pinBtn.title = 'rotation.mode 是 lru：每个请求都重新挑号，手动指定不会生效';
         }
-        actTd.appendChild(pinBtn);
+        actWrap.appendChild(pinBtn);
       }
+
+      if (a.cooling) {
+        var unlockBtn = document.createElement('button');
+        unlockBtn.type = 'button';
+        unlockBtn.className = 'pin unlock';
+        unlockBtn.textContent = '解锁';
+        unlockBtn.title = '解除冷却，让「' + a.name + '」立即回到可用池（若额度仍耗尽，下次请求会再次冷却）';
+        unlockBtn.addEventListener('click', function () { unlockAccount(a, unlockBtn); });
+        actWrap.appendChild(unlockBtn);
+      }
+      actTd.appendChild(actWrap);
       tr.appendChild(actTd);
 
       tbody.appendChild(tr);
@@ -856,6 +876,35 @@
         state.pinning = false;
         toast('切换失败：' + e.message, true);
         if (btn) { btn.disabled = false; btn.textContent = '设为当前'; }
+      });
+  }
+
+  // The "一键解锁" action: POST /admin/unlock to clear one account's cooldown.
+  // Unlike pinAccount this never moves the rotation pointer and never asks for
+  // confirmation — the whole point is a single click.
+  function unlockAccount(a, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = '解锁中…'; }
+    fetch('/admin/unlock', {
+      method: 'POST',
+      headers: Object.assign({ 'content-type': 'application/json' }, authHeaders()),
+      body: JSON.stringify({ index: a.index }),
+      cache: 'no-store'
+    })
+      .then(asJson)
+      .then(function (o) {
+        if (!o.ok) {
+          var msg = (o.body && o.body.error && o.body.error.message) || ('HTTP ' + o.status);
+          if (o.status === 401) openUnlockGate('密钥不正确，请重试', false);
+          toast('解锁失败：' + msg, true);
+          if (btn) { btn.disabled = false; btn.textContent = '解锁'; }
+          return;
+        }
+        toast('已解锁「' + o.body.name + '」，已回到可用池' + (o.body.wasCooling ? '' : '（本来就没在冷却）'));
+        load();
+      })
+      .catch(function (e) {
+        toast('解锁失败：' + e.message, true);
+        if (btn) { btn.disabled = false; btn.textContent = '解锁'; }
       });
   }
 
